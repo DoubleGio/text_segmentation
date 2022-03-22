@@ -1,6 +1,6 @@
 # Papers overview
 
-## Implementations - supervised
+## Implementations - Supervised
 * [SECTOR: A Neural Model for Coherent Topic Segmentation and Classification](https://doi.org/10.1162/tacl_a_00261)
   * **Custom labelled dataset**, **LSTM networks**, Sentence Encoding: **Bag-of-words (+ Bloom filter)** vs. **Word2Vec**, **Topic Embedding**, **Topic Segmentation**, **Topic Classification**
 * [Text Segmentation as a Supervised Learning Task](https://doi.org/10.48550/arXiv.1803.09337)
@@ -13,3 +13,7 @@
   * **Fixed sentence lengths + word2vec embeddings**, **CNN transformation -> sentence representation**, **2 vertically stacked BiLSTM**, **Soft attention layer**
 * 
 
+## Interesting methods
+* [Attention is All you Need](https://proceedings.neurips.cc/paper/2017/file/3f5ee243547dee91fbd053c1c4a845aa-Paper.pdf)
+  * [Video summary](https://www.youtube.com/watch?v=iDulhoQ2pro)
+  * Capture long range dependencies better (than RNNs) by using attention layers.

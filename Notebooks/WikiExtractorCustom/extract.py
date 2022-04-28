@@ -186,7 +186,7 @@ listItem = {'*': '<li>%s</li>', '#': '<li>%s</<li>', ';': '<dt>%s</dt>',
             ':': '<dd>%s</dd>'}
 
 
-def compact(text, mark_headers=False):
+def compact(text):
     """Deal with headers, lists, empty sections, residuals of tables.
     :param text: convert to HTML
     """
@@ -210,8 +210,8 @@ def compact(text, mark_headers=False):
             if title and title[-1] not in '!?':
                 title += '.'
 
-            if mark_headers:
-                title = "## " + title
+            if Extractor.headersMark:
+                title = Extractor.headersMark + title + Extractor.headersMark
 
             headers[lev] = title
             # drop previous headers
@@ -268,7 +268,7 @@ def compact(text, mark_headers=False):
         elif (line[0] == '(' and line[-1] == ')') or line.strip('.-') == '':
             continue
         elif len(headers):
-            if Extractor.keepSections:
+            if Extractor.keepHeaders:
                 items = sorted(headers.items())
                 for (i, v) in items:
                     page.append(v)
@@ -800,9 +800,11 @@ class Extractor():
     keepLinks = False
 
     ##
-    # Whether to preserve section titles
-    keepSections = True
-
+    # Whether to preserve section titles.
+    keepHeaders = True
+    # How to mark headers (if kept).
+    headersMark: str=None
+    
     ##
     # Whether to output text with HTML formatting elements in <doc> files.
     HtmlFormatting = False
@@ -827,12 +829,8 @@ class Extractor():
         self.recursion_exceeded_3_errs = 0  # parameter recursion
         self.template_title_errs = 0
 
-    def clean_text(self, text, mark_headers=False, expand_templates=False,
-                   html_safe=True):
-        """
-        :param mark_headers: True to distinguish headers from paragraphs
-          e.g. "## Section 1"
-        """
+
+    def clean_text(self, text, expand_templates=False, html_safe=True):
         self.magicWords['pagename'] = self.title
         self.magicWords['fullpagename'] = self.title
         self.magicWords['currentyear'] = time.strftime('%Y')
@@ -844,7 +842,7 @@ class Extractor():
         text = clean(self, text, expand_templates=expand_templates,
                      html_safe=html_safe)
 
-        text = compact(text, mark_headers=mark_headers)
+        text = compact(text)
         return text
 
     def extract(self, out, html_safe=True):
@@ -870,7 +868,7 @@ class Extractor():
         else:
             header = '<doc id="%s" url="%s" title="%s">\n' % (self.id, self.url, self.title)
             # Separate header from text with a newline.
-            header += self.title + '\n\n'
+            header += Extractor.headersMark + self.title + Extractor.headersMark + '\n\n'
             footer = "\n</doc>\n"
             out.write(header)
             out.write('\n'.join(text))

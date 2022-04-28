@@ -53,7 +53,7 @@ The program performs template expansion by preprocesssng the whole dump and
 collecting template definitions.
 """
 
-# import argparse
+import argparse
 import bz2
 import logging
 import os.path
@@ -68,6 +68,9 @@ from typing import Union
 from .extract import Extractor, ignoreTag, define_template, acceptedNamespaces
 
 # ===========================================================================
+
+# Program version
+__version__ = '3.0.6'
 
 ##
 # Defined in <siteinfo>
@@ -179,7 +182,7 @@ tagRE = re.compile(r'(.*?)<(/?\w+)[^>]*>(?:([^<]*)(<.*?>)?)?')
 #                    1     2               3      4
 
 
-def load_templates(file, output_file=None):
+def load_templates(file, n_articles=0, output_file=None):
     """
     Load templates from :param file:.
     :param output_file: file where to save templates and modules.
@@ -246,6 +249,8 @@ def load_templates(file, output_file=None):
             articles += 1
             if articles % 100000 == 0:
                 logging.info("Preprocessed %d pages", articles)
+            if n_articles != 0 and articles == n_articles:
+                break
     if output_file:
         output.close()
         logging.info("Saved %d templates to '%s'", templates, output_file)
@@ -268,7 +273,7 @@ def decode_open(filename, mode='rt', encoding='utf-8'):
 
 
 def process_dump(input_file, template_file, out_file, file_size, file_compress,
-                 process_count, html_safe):
+                 process_count, html_safe, expand_templates, n_articles=0):
     """
     :param input_file: name of the wikipedia dump file; '-' to read from stdin
     :param template_file: optional file with template definitions.
@@ -276,6 +281,9 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     :param file_size: max size of each extracted file, or None for no max (one file)
     :param file_compress: whether to compress files with bzip.
     :param process_count: number of extraction processes to spawn.
+    :param html_safe: whether to produce html-safe output.
+    :param expand_templates: whether to exapnd templates.
+    :param n_articles: how many articles to process; process all if 0.
     """
     global knownNamespaces
     global templateNamespace, templatePrefix
@@ -314,14 +322,14 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
         if template_file and os.path.exists(template_file):
             logging.info("Preprocessing '%s' to collect template definitions: this may take some time.", template_file)
             file = decode_open(template_file)
-            templates = load_templates(file)
+            templates = load_templates(file, n_articles)
             file.close()
         else:
             if input_file == '-':
                 # can't scan then reset stdin; must error w/ suggestion to specify template_file
                 raise ValueError("to use templates with stdin dump, must supply explicit template-file")
             logging.info("Preprocessing '%s' to collect template definitions: this may take some time.", input_file)
-            templates = load_templates(input, template_file)
+            templates = load_templates(input, n_articles, template_file)
             input.close()
             input = decode_open(input_file)
         template_load_elapsed = default_timer() - template_load_start
@@ -421,6 +429,8 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
             id = ''
             revid = ''
             page = []
+            if n_articles != 0 and ordinal == n_articles:
+                break
 
     input.close()
 
@@ -501,9 +511,9 @@ def reduce_process(output_queue, output):
 # Minimum size of output files
 minFileSize = 200 * 1024
 
-def extract(input: Union[Path, str], output: Union[Path, str], # Required arguments
-    bytes="1M", compress=False, json=False, # Output arguments (optional)
-    html=False, links=False, namespaces=None, templates=None, expand_templates=False, html_save=True, process_count=cpu_count()-1, # Processing arguments (optional)
+def wiki_extract(input: Union[Path, str], output: Union[Path, str], # Required arguments
+    bytes="0", compress=False, json=False, # Output arguments (optional)
+    n_articles=0, keep_headers=True, headers_mark: str=None, html=False, keep_links=False, namespaces: str=None, templates: Union[Path, str]=None, expand_templates=True, html_safe=True, process_count=cpu_count()-1, # Processing arguments (optional)
     quiet=True, debug=False, article=False, # Special arguments (optional)
 ):
     """
@@ -517,27 +527,125 @@ def extract(input: Union[Path, str], output: Union[Path, str], # Required argume
         Location of directory for extracted files (or '-' for dumping to stdout). Directory is created if it doesn't exist.
     
     Optional output arguments
-    bytes : str, default = "1M"
-        Maximum bytes per output file (n[KMG]); 0 means to put a single article per file.
+    bytes : str, default = "0"
+        Maximum bytes per output file (n[KMG], e.g.: "1M"); "0" means to put a single article per file.
     compress : bool, default = False
         If True, compress the output files using bzip.
     json : bool, default = False
         If True, write output in json format instead of the default <doc> format.
     
     Optional processing arguments
+    n_articles: int, default = 0,
+        Number of articles to process. If None, process all.
+    keep_headers: bool, default = True
+        If True, preserve headers.
+    headers_mark: str, default = None
+        Set a string to use as marking for headers.
     html: bool, default = False
         If True, produce HTML output, subsumes "links" parameter.
-    links: bool, default = False
+    keep_links: bool, default = False
         If True, perserve links.
     namespaces: ["ns1", "ns2"], default = None
         Set accepted namespaces.
-    templates: 
+    templates: Path or str, default = None
+        Set to use/create a file containing the expanded templates (to speed up subsequent extractions).
+    expand_templates: bool, default = True
+        If False, does not expand templates, making procesing significantly quicker.
+    html_safe: bool, default = True
+        If True, produce HTML safe ouput.
+    process_count: int, default = cpu_count()-1
+        Number of processes to use.
+
+    Optional special arguments
+    quiet: bool, default = True
+        If True, does not report progress info.
+    debug: bool, default = False
+        If True, print debug info.
+    article: bool, default = False
+        If True analyze a file containing a single article (debug option).
     """
-    Extractor.keepLinks = kwargs.get()
+    global urlbase, acceptedNamespaces
+    global templateCache
+
+    Extractor.keepLinks = keep_links
+    Extractor.HtmlFormatting = html
+    if html:
+        Extractor.keepLinks = True
+    Extractor.to_json = json
+    Extractor.keepHeaders = keep_headers
+    Extractor.headersMark = headers_mark
+
+    try:
+        power = 'kmg'.find(bytes[-1].lower()) + 1
+        # 0 bytes means put a single article per file.
+        file_size = 0 if bytes == '0' else int(bytes[:-1]) * 1024 ** power
+        if file_size and file_size < minFileSize:
+            raise ValueError()
+    except ValueError:
+        logging.error('Insufficient or invalid size: %s', bytes)
+        return
+
+    if namespaces:
+        acceptedNamespaces = set(namespaces.split(','))
+
+    FORMAT = '%(levelname)s: %(message)s'
+    logging.basicConfig(format=FORMAT)
+
+    logger = logging.getLogger()
+    if not quiet:
+        logger.setLevel(logging.INFO)
+    if debug:
+        logger.setLevel(logging.DEBUG)
+
+    input_file = input
+
+    if not Extractor.keepLinks:
+        ignoreTag('a')
+
+    # sharing cache of parser templates is too slow:
+    # manager = Manager()
+    # templateCache = manager.dict()
+
+    if article:
+        if templates:
+            if os.path.exists(templates):
+                with open(templates) as file:
+                    load_templates(file)
+
+        with open(input_file) as file:
+            page = file.read()
+            ids = re.findall(r'<id>(\d*?)</id>', page)
+            id = ids[0] if ids else ''
+            revid = ids[1] if len(ids) > 1 else ''
+            m = re.search(r'<title>(.*?)</title>', page)
+            if m:
+                title = m.group(1)
+            else:
+                logging.error('Missing title element')
+                return
+            m = re.search(r'<base>(.*?)</base>', page)
+            if m:
+                base = m.group(1)
+                urlbase = base[:base.rfind("/")]
+            else:
+                urlbase = ''
+            Extractor(id, revid, urlbase, title, [page]).extract(sys.stdout)
+        return
+
+    output_path = output
+    if output_path != '-' and not os.path.isdir(output_path):
+        try:
+            os.makedirs(output_path)
+        except:
+            logging.error('Could not create: %s', output_path)
+            return
+
+    process_dump(input_file, templates, output_path, file_size,
+                 compress, process_count, html_safe, expand_templates, n_articles)
 
 def main():
     global urlbase, acceptedNamespaces
-    global expand_templates, templateCache
+    global templateCache
 
     parser = argparse.ArgumentParser(prog=os.path.basename(sys.argv[0]),
                                      formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -579,9 +687,9 @@ def main():
                         help="print debug info")
     groupS.add_argument("-a", "--article", action="store_true",
                         help="analyze a file containing a single article (debug option)")
-    # groupS.add_argument("-v", "--version", action="version",
-    #                     version='%(prog)s ' + __version__,
-    #                     help="print program version")
+    groupS.add_argument("-v", "--version", action="version",
+                        version='%(prog)s ' + __version__,
+                        help="print program version")
 
     args = parser.parse_args()
 
@@ -590,8 +698,6 @@ def main():
     if args.html:
         Extractor.keepLinks = True
     Extractor.to_json = args.json
-
-    expand_templates = args.no_templates
 
     try:
         power = 'kmg'.find(args.bytes[-1].lower()) + 1
@@ -659,8 +765,8 @@ def main():
             return
 
     process_dump(input_file, args.templates, output_path, file_size,
-                 args.compress, args.processes, args.html_safe)
+                 args.compress, args.processes, args.html_safe, args.no_templates)
 
 
-# if __name__ == '__main__':
-#     main()
+if __name__ == '__main__':
+    main()

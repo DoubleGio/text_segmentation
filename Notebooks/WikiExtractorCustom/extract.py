@@ -209,7 +209,6 @@ def compact(text):
                 page.append("<h%d>%s</h%d>" % (lev, title, lev))
             if title and title[-1] not in '!?':
                 title += '.'
-
             if Extractor.headersMark:
                 title = Extractor.headersMark + title + Extractor.headersMark
 

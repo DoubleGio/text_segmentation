@@ -420,7 +420,7 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
             page.append(line)
         elif tag == '/page':
             colon = title.find(':')
-            if (colon < 0 or (title[:colon] in acceptedNamespaces) and id != last_id and
+            if (colon < 0 or (title[:colon] in acceptedNamespaces)) and (id != last_id and
                     not redirect and not title.startswith(templateNamespace)):
                 job = (id, revid, urlbase, title, page, ordinal)
                 jobs_queue.put(job)  # goes to any available extract_process
@@ -511,7 +511,7 @@ def reduce_process(output_queue, output):
 # Minimum size of output files
 minFileSize = 200 * 1024
 
-def wiki_extract(input: Union[Path, str], output: Union[Path, str], # Required arguments
+def wiki_extract(input: Union[Path, str], output: Union[Path, str]="-", # Required arguments
     bytes="0", compress=False, json=False, # Output arguments (optional)
     n_articles=0, keep_headers=True, headers_mark: str=None, html=False, keep_links=False, namespaces: str=None, templates: Union[Path, str]=None, expand_templates=True, html_safe=True, process_count=cpu_count()-1, # Processing arguments (optional)
     quiet=True, debug=False, article=False, # Special arguments (optional)
@@ -536,7 +536,7 @@ def wiki_extract(input: Union[Path, str], output: Union[Path, str], # Required a
     
     Optional processing arguments
     n_articles: int, default = 0,
-        Number of articles to process. If None, process all.
+        Number of articles to process. If 0, process all.
     keep_headers: bool, default = True
         If True, preserve headers.
     headers_mark: str, default = None
@@ -653,9 +653,9 @@ def main():
     parser.add_argument("input",
                         help="XML wiki dump file")
     groupO = parser.add_argument_group('Output')
-    groupO.add_argument("-o", "--output", default="text",
+    groupO.add_argument("-o", "--output", default="-",
                         help="directory for extracted files (or '-' for dumping to stdout)")
-    groupO.add_argument("-b", "--bytes", default="1M",
+    groupO.add_argument("-b", "--bytes", default="0",
                         help="maximum bytes per output file (default %(default)s); 0 means to put a single article per file",
                         metavar="n[KMG]")
     groupO.add_argument("-c", "--compress", action="store_true",
@@ -664,6 +664,12 @@ def main():
                         help="write output in json format instead of the default <doc> format")
 
     groupP = parser.add_argument_group('Processing')
+    groupP.add_argument("-n", "--n-articles", default=0,
+                        help="max amount of articles to process; process all for 0")
+    groupP.add_argument("-rh", "--remove-headers", action="store_false",
+                        help="whether to remove the headers")
+    groupP.add_argument("-hm", "--headers-mark", type=str,
+                        help="set a string to use as marking for headers")
     groupP.add_argument("--html", action="store_true",
                         help="produce HTML output, subsumes --links")
     groupP.add_argument("-l", "--links", action="store_true",
@@ -674,10 +680,9 @@ def main():
                         help="use or create file containing templates")
     groupP.add_argument("--no-templates", action="store_false",
                         help="Do not expand templates")
-    groupP.add_argument("--html-safe", default=True,
+    groupP.add_argument("--html-safe", action="store_false", default=True,
                         help="use to produce HTML safe output within <doc>...</doc>")
-    default_process_count = cpu_count() - 1
-    parser.add_argument("--processes", type=int, default=default_process_count,
+    parser.add_argument("--processes", type=int, default=cpu_count()-1,
                         help="Number of processes to use (default %(default)s)")
 
     groupS = parser.add_argument_group('Special')
@@ -698,6 +703,8 @@ def main():
     if args.html:
         Extractor.keepLinks = True
     Extractor.to_json = args.json
+    Extractor.keepHeaders = args.remove_headers
+    Extractor.headersMark = args.headers_mark
 
     try:
         power = 'kmg'.find(args.bytes[-1].lower()) + 1
@@ -765,7 +772,7 @@ def main():
             return
 
     process_dump(input_file, args.templates, output_path, file_size,
-                 args.compress, args.processes, args.html_safe, args.no_templates)
+                 args.compress, args.processes, args.html_safe, args.no_templates, args.n_articles)
 
 
 if __name__ == '__main__':

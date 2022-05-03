@@ -22,10 +22,13 @@ import re
 import html
 import json
 from itertools import zip_longest
+from typing import List
 from urllib.parse import quote as urlencode
 from html.entities import name2codepoint
 import logging
 import time
+
+from requests import head
 
 # ----------------------------------------------------------------------
 
@@ -66,8 +69,41 @@ def get_url(urlbase, uid):
 
 # ======================================================================
 
+def ts_filter(text: List[str], **kwargs) -> List[str]:
+    min_line_len = 30
+    min_seg_len = 150
 
-def clean(extractor, text, expand_templates=False, html_safe=True):
+    res = []
+    seg = []
+    i = 0
+    header = None
+        
+    while True:
+        if i == len(text): 
+            if len(seg) > 0: # Filter out headers without segments
+                if len(''.join(seg)) >= min_seg_len: # Filter out segments shorter than 150 chararcters
+                    if header:
+                        res.append(header)
+                    res = res + seg
+            break
+
+        line = text[i]
+        if line.startswith(Extractor.headersMark):
+            if len(seg) > 0: # Filter out headers without segments
+                if len(''.join(seg)) >= min_seg_len: # Filter out segments shorter than 150 chararcters
+                    if header:
+                        res.append(header)
+                    res = res + seg
+                seg = []
+            header = line
+        elif len(line) >= min_line_len:
+            seg.append(line)
+        i += 1
+    return res
+
+
+
+def clean(extractor, text, expand_templates=False, html_safe=True) -> str:
     """
     Transforms wiki markup. If the command line flag --escapedoc is set then the text is also escaped
     @see https://www.mediawiki.org/wiki/Help:Formatting
@@ -186,7 +222,7 @@ listItem = {'*': '<li>%s</li>', '#': '<li>%s</<li>', ';': '<dt>%s</dt>',
             ':': '<dd>%s</dd>'}
 
 
-def compact(text):
+def compact(text: str) -> List[str]:
     """Deal with headers, lists, empty sections, residuals of tables.
     :param text: convert to HTML
     """
@@ -802,7 +838,7 @@ class Extractor():
     # Whether to preserve section titles.
     keepHeaders = True
     # How to mark headers (if kept).
-    headersMark: str=None
+    headersMark = "==="
     
     ##
     # Whether to output text with HTML formatting elements in <doc> files.
@@ -811,6 +847,8 @@ class Extractor():
     ##
     # Whether to produce json instead of the default <doc> output format.
     toJson = False
+
+    tsMode = False
 
     def __init__(self, id, revid, urlbase, title, page):
         """
@@ -829,7 +867,7 @@ class Extractor():
         self.template_title_errs = 0
 
 
-    def clean_text(self, text, expand_templates=False, html_safe=True):
+    def clean_text(self, text: str, expand_templates=False, html_safe=True):
         self.magicWords['pagename'] = self.title
         self.magicWords['fullpagename'] = self.title
         self.magicWords['currentyear'] = time.strftime('%Y')
@@ -852,8 +890,10 @@ class Extractor():
         logging.debug("%s\t%s", self.id, self.title)
         text = ''.join(self.page)
         text = self.clean_text(text, html_safe=html_safe)
+        if Extractor.tsMode:
+            text = ts_filter(text)
 
-        if self.to_json:
+        if Extractor.toJson:
             json_data = {
 		'id': self.id,
                 'revid': self.revid,

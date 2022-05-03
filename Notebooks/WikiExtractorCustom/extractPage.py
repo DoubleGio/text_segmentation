@@ -27,12 +27,14 @@
 Extracts a single page from a Wikipedia dump file.
 """
 
+import logging
 from typing import Union
 import sys, os.path
 import re
 import argparse
 import bz2
-
+from io import StringIO
+from .extract import Extractor
 
 # Program version
 __version__ = '3.0.5'
@@ -43,17 +45,19 @@ __version__ = '3.0.5'
 tagRE = re.compile(r'(.*?)<(/?\w+)[^>]*>(?:([^<]*)(<.*?>)?)?')
 #                    1     2               3      4
 
-def process_data(input_file, id, templates=False) -> str:
+def extract_page(input_file: str, id: Union[int, str]=1, template=False, quiet=True) -> str:
     """
-    :param input_file: name of the wikipedia dump file.
+    :param input_file: name of the wikipedia dump file
     :param id: article id
+    :param template: whether the article is a template or not
     """
-
+    set_logging(quiet)
     if input_file.lower().endswith(".bz2"):
         input = bz2.open(input_file, mode='rt', encoding='utf-8')
     else:
         input = open(input_file)
 
+    id = str(id)
     res = ""
     page = []
     for line in input:
@@ -75,10 +79,10 @@ def process_data(input_file, id, templates=False) -> str:
             if id == curid:
                 page.append(line)
                 inArticle = True
-            elif not inArticle and not templates:
+            elif not inArticle and not template:
                 page = []
         elif tag == 'title':
-            if templates:
+            if template:
                 if m.group(3).startswith('Template:'):
                     page.append(line)
                 else:
@@ -89,7 +93,7 @@ def process_data(input_file, id, templates=False) -> str:
             if page:
                 page.append(line)
                 res = ''.join(page)
-                if not templates:
+                if not template:
                     break
             page = []
         elif page:
@@ -98,8 +102,65 @@ def process_data(input_file, id, templates=False) -> str:
     input.close()
     return res
 
-def page_extract(input: str, id: Union[int, str]=1, template: str=None) -> str:
-    return process_data(input, str(id), template)
+def extract_clean(input_file: str, id: Union[int, str]=1, template=False, quiet=True) -> str:
+    set_logging(quiet)
+    if input_file.lower().endswith(".bz2"):
+        input = bz2.open(input_file, mode='rt', encoding='utf-8')
+    else:
+        input = open(input_file)
+
+    Extractor.tsMode = True
+
+    id = str(id)
+    res = StringIO()
+    page = []
+
+    found = False
+    inText = False
+    for line in input:
+        if '<' not in line:  # faster than doing re.search()
+            if inText and found:
+                page.append(line)
+            continue
+        m = tagRE.search(line)
+        if not m:
+            continue
+        tag = m.group(2)
+        if tag == 'page':
+            page = []
+        elif tag == 'id':
+            curid = m.group(3)
+            if id == str(curid):
+                found = True
+        elif tag == 'title':
+            title = m.group(3)
+        elif tag == 'text':
+            inText = True
+            line = line[m.start(3):m.end(3)]
+            page.append(line)
+            if m.lastindex == 4:  # open-close
+                inText = False
+        elif tag == '/text':
+            if m.group(1):
+                page.append(m.group(1))
+            inText = False
+        elif inText and found:
+            page.append(line)
+        elif tag == '/page' and found:
+            Extractor(id=id, revid='', urlbase="", title=title, page=page).extract(out=res)
+            break
+    
+    return res.getvalue()
+
+def set_logging(quiet=True):
+    if not quiet:
+        logger = logging.getLogger()
+        logger.setLevel(logging.INFO)
+    else:
+        try:
+            del logger
+        except:
+            pass
 
 def main():
     parser = argparse.ArgumentParser(prog=os.path.basename(sys.argv[0]),
@@ -111,13 +172,19 @@ def main():
                         help="article number")
     parser.add_argument("--template", action="store_true",
                         help="template number")
+    parser.add_argument("-q", "--quiet", action="store_true",
+                        help="suppress reporting progress info")
+    parser.add_argument("-c", "--clean", action="store_false",
+                        help="whether to clean up the document")
     parser.add_argument("-v", "--version", action="version",
                         version='%(prog)s ' + __version__,
                         help="print program version")
 
     args = parser.parse_args()
-
-    print(process_data(args.input, args.id, args.template))
+    if args.clean:
+        print(extract_clean(args.input, args.id, args.template, args.quiet))
+    else:
+        print(extract_page(args.input, args.id, args.template, args.quiet))
 
 if __name__ == '__main__':
     main()

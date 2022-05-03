@@ -65,8 +65,6 @@ from multiprocessing import Queue, get_context, cpu_count
 from timeit import default_timer
 from typing import Union
 
-from .extract import Extractor, ignoreTag, define_template, acceptedNamespaces
-
 # ===========================================================================
 
 # Program version
@@ -514,7 +512,7 @@ minFileSize = 200 * 1024
 def wiki_extract(input: Union[Path, str], output: Union[Path, str]="-", # Required arguments
     bytes="0", compress=False, json=False, # Output arguments (optional)
     n_articles=0, keep_headers=True, headers_mark: str=None, html=False, keep_links=False, namespaces: str=None, templates: Union[Path, str]=None, expand_templates=True, html_safe=True, process_count=cpu_count()-1, # Processing arguments (optional)
-    quiet=True, debug=False, article=False, # Special arguments (optional)
+    quiet=True, debug=False, article=False, ts_mode=False # Special arguments (optional)
 ):
     """
     main() from original WikiExtractor.py transformed into callable function.
@@ -539,7 +537,7 @@ def wiki_extract(input: Union[Path, str], output: Union[Path, str]="-", # Requir
         Number of articles to process. If 0, process all.
     keep_headers: bool, default = True
         If True, preserve headers.
-    headers_mark: str, default = None
+    headers_mark: str, default = '==='
         Set a string to use as marking for headers.
     html: bool, default = False
         If True, produce HTML output, subsumes "links" parameter.
@@ -563,6 +561,8 @@ def wiki_extract(input: Union[Path, str], output: Union[Path, str]="-", # Requir
         If True, print debug info.
     article: bool, default = False
         If True analyze a file containing a single article (debug option).
+    ts_mode: bool, default = False
+        Specific for Text Segmentation datasets, if True, filters out short segments and lines.
     """
     global urlbase, acceptedNamespaces
     global templateCache
@@ -571,9 +571,10 @@ def wiki_extract(input: Union[Path, str], output: Union[Path, str]="-", # Requir
     Extractor.HtmlFormatting = html
     if html:
         Extractor.keepLinks = True
-    Extractor.to_json = json
+    Extractor.toJson = json
     Extractor.keepHeaders = keep_headers
     Extractor.headersMark = headers_mark
+    Extractor.tsMode = ts_mode
 
     try:
         power = 'kmg'.find(bytes[-1].lower()) + 1
@@ -644,9 +645,6 @@ def wiki_extract(input: Union[Path, str], output: Union[Path, str]="-", # Requir
                  compress, process_count, html_safe, expand_templates, n_articles)
 
 def main():
-    global urlbase, acceptedNamespaces
-    global templateCache
-
     parser = argparse.ArgumentParser(prog=os.path.basename(sys.argv[0]),
                                      formatter_class=argparse.RawDescriptionHelpFormatter,
                                      description=__doc__)
@@ -668,8 +666,8 @@ def main():
                         help="max amount of articles to process; process all for 0")
     groupP.add_argument("-rh", "--remove-headers", action="store_false",
                         help="whether to remove the headers")
-    groupP.add_argument("-hm", "--headers-mark", type=str,
-                        help="set a string to use as marking for headers")
+    groupP.add_argument("-hm", "--headers-mark", default="===",
+                        help="set a string to use as marking for headers (default='===')")
     groupP.add_argument("--html", action="store_true",
                         help="produce HTML output, subsumes --links")
     groupP.add_argument("-l", "--links", action="store_true",
@@ -680,7 +678,7 @@ def main():
                         help="use or create file containing templates")
     groupP.add_argument("--no-templates", action="store_false",
                         help="Do not expand templates")
-    groupP.add_argument("--html-safe", action="store_false", default=True,
+    groupP.add_argument("--html-safe", action="store_false",
                         help="use to produce HTML safe output within <doc>...</doc>")
     parser.add_argument("--processes", type=int, default=cpu_count()-1,
                         help="Number of processes to use (default %(default)s)")
@@ -692,88 +690,24 @@ def main():
                         help="print debug info")
     groupS.add_argument("-a", "--article", action="store_true",
                         help="analyze a file containing a single article (debug option)")
+    groupS.add_argument("-ts", "--ts-mode", action="store_true",
+                        help="activate for text segmentation specific filters")
     groupS.add_argument("-v", "--version", action="version",
                         version='%(prog)s ' + __version__,
                         help="print program version")
 
     args = parser.parse_args()
 
-    Extractor.keepLinks = args.links
-    Extractor.HtmlFormatting = args.html
-    if args.html:
-        Extractor.keepLinks = True
-    Extractor.to_json = args.json
-    Extractor.keepHeaders = args.remove_headers
-    Extractor.headersMark = args.headers_mark
-
-    try:
-        power = 'kmg'.find(args.bytes[-1].lower()) + 1
-        # 0 bytes means put a single article per file.
-        file_size = 0 if args.bytes == '0' else int(args.bytes[:-1]) * 1024 ** power
-        if file_size and file_size < minFileSize:
-            raise ValueError()
-    except ValueError:
-        logging.error('Insufficient or invalid size: %s', args.bytes)
-        return
-
-    if args.namespaces:
-        acceptedNamespaces = set(args.namespaces.split(','))
-
-    FORMAT = '%(levelname)s: %(message)s'
-    logging.basicConfig(format=FORMAT)
-
-    logger = logging.getLogger()
-    if not args.quiet:
-        logger.setLevel(logging.INFO)
-    if args.debug:
-        logger.setLevel(logging.DEBUG)
-
-    input_file = args.input
-
-    if not Extractor.keepLinks:
-        ignoreTag('a')
-
-    # sharing cache of parser templates is too slow:
-    # manager = Manager()
-    # templateCache = manager.dict()
-
-    if args.article:
-        if args.templates:
-            if os.path.exists(args.templates):
-                with open(args.templates) as file:
-                    load_templates(file)
-
-        with open(input_file) as file:
-            page = file.read()
-            ids = re.findall(r'<id>(\d*?)</id>', page)
-            id = ids[0] if ids else ''
-            revid = ids[1] if len(ids) > 1 else ''
-            m = re.search(r'<title>(.*?)</title>', page)
-            if m:
-                title = m.group(1)
-            else:
-                logging.error('Missing title element')
-                return
-            m = re.search(r'<base>(.*?)</base>', page)
-            if m:
-                base = m.group(1)
-                urlbase = base[:base.rfind("/")]
-            else:
-                urlbase = ''
-            Extractor(id, revid, urlbase, title, [page]).extract(sys.stdout)
-        return
-
-    output_path = args.output
-    if output_path != '-' and not os.path.isdir(output_path):
-        try:
-            os.makedirs(output_path)
-        except:
-            logging.error('Could not create: %s', output_path)
-            return
-
-    process_dump(input_file, args.templates, output_path, file_size,
-                 args.compress, args.processes, args.html_safe, args.no_templates, args.n_articles)
+    wiki_extract(input=args.input, output=args.output, 
+        bytes=args.bytes, compress=args.compress, json=args.json, 
+        n_articles=args.n_articles, keep_headers=not args.remove_headers, headers_mark=args.headers_mark, html=args.html, keep_links=args.links, namespaces=args.namespaces, templates=args.templates, expand_templates=not args.no_templates, html_safe=args.html_safe, process_count=args.process_count,
+        quiet=args.quiet, debug=args.debug, article=args.article, ts_mode=args.ts_mode)
 
 
 if __name__ == '__main__':
+    from extract import Extractor, ignoreTag, define_template, acceptedNamespaces
     main()
+else:
+    from .extract import Extractor, ignoreTag, define_template, acceptedNamespaces
+
+

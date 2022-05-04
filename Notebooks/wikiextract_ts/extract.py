@@ -33,7 +33,7 @@ from requests import head
 # ----------------------------------------------------------------------
 
 # match tail after wikilink
-tailRE = re.compile('\w+')
+tailRE = re.compile(r'\w+')
 syntaxhighlight = re.compile('&lt;syntaxhighlight .*?&gt;(.*?)&lt;/syntaxhighlight&gt;', re.DOTALL)
 
 ## PARAMS ####################################################################
@@ -41,7 +41,7 @@ syntaxhighlight = re.compile('&lt;syntaxhighlight .*?&gt;(.*?)&lt;/syntaxhighlig
 ##
 # Defined in <siteinfo>
 # We include as default Template, when loading external template file.
-knownNamespaces = set(['Template'])
+known_namespaces = set(['Template'])
 
 ##
 # Drop these elements from article text
@@ -60,46 +60,49 @@ discardElements = [
 # wiktionary: Wiki dictionary
 # wikt: shortcut for Wiktionary
 #
-acceptedNamespaces = ['w', 'wiktionary', 'wikt']
-
-
-def get_url(urlbase, uid):
-    return "%s?curid=%s" % (urlbase, uid)
+accepted_namespaces = ['w', 'wiktionary', 'wikt']
 
 
 # ======================================================================
 
-def ts_filter(text: List[str], **kwargs) -> List[str]:
-    min_line_len = 30
-    min_seg_len = 150
+def ts_filter(text: List[str]) -> List[str]:
+    '''
+    Filters out documents ill-suited to for the NLP task of Text Segmentation.
+    :param text: List of strings, containing the headers and pieces of the text.
+    '''
+    MIN_LINE_LEN = 30
+    MIN_SEG_LEN = 150
 
     res = []
     seg = []
     i = 0
+    n_seg = 0
     header = None
-        
+    
     while True:
-        if i == len(text): 
+        if i == len(text):
             if len(seg) > 0: # Filter out headers without segments
-                if len(''.join(seg)) >= min_seg_len: # Filter out segments shorter than 150 chararcters
+                if len(''.join(seg)) >= MIN_SEG_LEN: # Filter out segments shorter than 150 chararcters
                     if header:
                         res.append(header)
                     res = res + seg
+                    n_seg += 1
             break
 
         line = text[i]
         if line.startswith(Extractor.headersMark):
             if len(seg) > 0: # Filter out headers without segments
-                if len(''.join(seg)) >= min_seg_len: # Filter out segments shorter than 150 chararcters
+                if len(''.join(seg)) >= MIN_SEG_LEN: # Filter out segments shorter than 150 chararcters
                     if header:
                         res.append(header)
                     res = res + seg
+                    n_seg += 1
                 seg = []
             header = line
-        elif len(line) >= min_line_len:
+        elif len(line) >= MIN_LINE_LEN:
             seg.append(line)
         i += 1
-    return res
+    return res if n_seg > 1 else []
 
 
 
@@ -517,12 +520,12 @@ def replaceInternalLinks(text):
 
 def makeInternalLink(title, label):
     colon = title.find(':')
-    if colon > 0 and title[:colon] not in acceptedNamespaces:
+    if colon > 0 and title[:colon] not in accepted_namespaces:
         return ''
     if colon == 0:
         # drop also :File:
         colon2 = title.find(':', colon + 1)
-        if colon2 > 1 and title[colon + 1:colon2] not in acceptedNamespaces:
+        if colon2 > 1 and title[colon + 1:colon2] not in accepted_namespaces:
             return ''
     if Extractor.keepLinks:
         return '<a href="%s">%s</a>' % (urlencode(title), label)
@@ -722,7 +725,7 @@ def normalizeTitle(title):
         rest = m.group(3)
 
         ns = normalizeNamespace(prefix)
-        if ns in knownNamespaces:
+        if ns in known_namespaces:
             # If the prefix designates a known namespace, then it might be
             # followed by optional whitespace that should be removed to get
             # the canonical page name
@@ -856,7 +859,7 @@ class Extractor():
         """
         self.id = id
         self.revid = revid
-        self.url = get_url(urlbase, id)
+        self.url = f"{urlbase}?curid={id}"
         self.title = title
         self.page = page
         self.magicWords = MagicWords()
@@ -893,26 +896,27 @@ class Extractor():
         if Extractor.tsMode:
             text = ts_filter(text)
 
-        if Extractor.toJson:
-            json_data = {
-		'id': self.id,
-                'revid': self.revid,
-                'url': self.url,
-                'title': self.title,
-                'text': "\n".join(text)
-            }
-            out_str = json.dumps(json_data)
-            out.write(out_str)
-            out.write('\n')
-        else:
-            header = '<doc id="%s" url="%s" title="%s">\n' % (self.id, self.url, self.title)
-            # Separate header from text with a newline.
-            header += Extractor.headersMark + self.title + Extractor.headersMark + '\n\n'
-            footer = "\n</doc>\n"
-            out.write(header)
-            out.write('\n'.join(text))
-            out.write('\n')
-            out.write(footer)
+        if text:
+            if Extractor.toJson:
+                json_data = {
+            'id': self.id,
+                    'revid': self.revid,
+                    'url': self.url,
+                    'title': self.title,
+                    'text': "\n".join(text)
+                }
+                out_str = json.dumps(json_data)
+                out.write(out_str)
+                out.write('\n')
+            else:
+                header = '<doc id="%s" url="%s" title="%s">\n' % (self.id, self.url, self.title)
+                # Separate header from text with a newline.
+                header += Extractor.headersMark + self.title + Extractor.headersMark + '\n\n'
+                footer = "\n</doc>\n"
+                out.write(header)
+                out.write('\n'.join(text))
+                out.write('\n')
+                out.write(footer)
 
         errs = (self.template_title_errs,
                 self.recursion_exceeded_1_errs,
@@ -1462,7 +1466,7 @@ def fullyQualifiedTemplateTitle(templateTitle):
             # colon found but not in the first position - check if it
             # designates a known namespace
             prefix = normalizeNamespace(m.group(1))
-            if prefix in knownNamespaces:
+            if prefix in known_namespaces:
                 return prefix + ucfirst(m.group(2))
     # The title of the page being included is NOT in the main namespace and
     # lacks any other explicit designation of the namespace - therefore, it

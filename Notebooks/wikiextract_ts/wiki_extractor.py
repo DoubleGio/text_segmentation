@@ -34,6 +34,7 @@
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 # =============================================================================
 
+# pylint: disable=unspecified-encoding
 """Wikipedia Extractor:
 Extracts and cleans text from a Wikipedia database dump and stores output in a
 number of files of similar size in a given directory.
@@ -58,7 +59,7 @@ import bz2
 import logging
 import os.path
 from pathlib import Path
-import re  # TODO use regex when it will be standard
+import re
 import sys
 from io import StringIO
 from multiprocessing import Queue, get_context, cpu_count
@@ -73,18 +74,19 @@ __version__ = '3.0.6'
 ##
 # Defined in <siteinfo>
 # We include as default Template, when loading external template file.
-knownNamespaces = set(['Template'])
+known_namespaces = set(['Template'])
 
 ##
 # The namespace used for template definitions
 # It is the name associated with namespace key=10 in the siteinfo header.
-templateNamespace = ''
-templatePrefix = ''
+template_namespace = ''
+template_prefix = ''
 
 ##
 # The namespace used for module definitions
 # It is the name associated with namespace key=828 in the siteinfo header.
-moduleNamespace = ''
+module_namespace = ''
+module_prefix = ''
 
 # ----------------------------------------------------------------------
 # Expand using WikiMedia API
@@ -103,12 +105,11 @@ moduleNamespace = ''
 
 
 class NextFile():
-
     """
     Synchronous generation of next available file name.
     """
 
-    filesPerDir = 100
+    FILES_PER_DIR = 100
 
     def __init__(self, path_name):
         self.path_name = path_name
@@ -116,7 +117,7 @@ class NextFile():
         self.file_index = -1
 
     def next(self):
-        self.file_index = (self.file_index + 1) % NextFile.filesPerDir
+        self.file_index = (self.file_index + 1) % NextFile.FILES_PER_DIR
         if self.file_index == 0:
             self.dir_index += 1
         dirname = self._dirname()
@@ -134,27 +135,26 @@ class NextFile():
 
 
 class OutputSplitter():
-
     """
     File-like object, that splits output to multiple files of a given max size.
     """
 
-    def __init__(self, nextFile, max_file_size=0, compress=True):
+    def __init__(self, next_file, max_file_size=0, compress=True):
         """
         :param nextFile: a NextFile object from which to obtain filenames
             to use.
         :param max_file_size: the maximum size of each file.
         :para compress: whether to write data with bzip compression.
         """
-        self.nextFile = nextFile
+        self.next_file = next_file
         self.compress = compress
         self.max_file_size = max_file_size
-        self.file = self.open(self.nextFile.next())
+        self.file = self.open(self.next_file.next())
 
     def reserve(self, size):
         if self.file.tell() + size > self.max_file_size:
             self.close()
-            self.file = self.open(self.nextFile.next())
+            self.file = self.open(self.next_file.next())
 
     def write(self, data):
         self.reserve(len(data))
@@ -185,20 +185,20 @@ def load_templates(file, n_articles=0, output_file=None):
     Load templates from :param file:.
     :param output_file: file where to save templates and modules.
     """
-    global templateNamespace, templatePrefix
-    templatePrefix = templateNamespace + ':'
-    global moduleNamespace, modulePrefix
-    modulePrefix = moduleNamespace + ':'
+    global template_prefix, template_namespace
+    template_prefix = template_namespace + ':'
+    global module_namespace, module_prefix
+    module_prefix = module_namespace + ':'
     articles = 0
     templates = 0
     page = []
-    inText = False
+    in_text = False
     if output_file:
         output = open(output_file, 'w')
     for line in file:
         #line = line.decode('utf-8')
         if '<' not in line:  # faster than doing re.search()
-            if inText:
+            if in_text:
                 page.append(line)
             continue
         m = tagRE.search(line)
@@ -210,37 +210,37 @@ def load_templates(file, n_articles=0, output_file=None):
         elif tag == 'title':
             title = m.group(3)
         elif tag == 'text':
-            inText = True
+            in_text = True
             line = line[m.start(3):m.end(3)]
             page.append(line)
             if m.lastindex == 4:  # open-close
-                inText = False
+                in_text = False
         elif tag == '/text':
             if m.group(1):
                 page.append(m.group(1))
-            inText = False
-        elif inText:
+            in_text = False
+        elif in_text:
             page.append(line)
         elif tag == '/page':
-            if not output_file and not templateNamespace:  # do not know it yet
+            if not output_file and not template_namespace:  # do not know it yet
                 # we reconstruct it from the first title
                 colon = title.find(':')
                 if colon > 1:
-                    templateNamespace = title[:colon]
-                    templatePrefix = title[:colon + 1]
+                    template_namespace = title[:colon]
+                    template_prefix = title[:colon + 1]
             # FIXME: should reconstruct also moduleNamespace
-            if title.startswith(templatePrefix):
+            if title.startswith(template_prefix):
                 define_template(title, page)
                 templates += 1
             # save templates and modules to file
-            if output_file and (title.startswith(templatePrefix) or
-                                title.startswith(modulePrefix)):
+            if output_file and (title.startswith(template_prefix) or
+                                title.startswith(module_prefix)):
                 output.write('<page>\n')
-                output.write('   <title>%s</title>\n' % title)
+                output.write(f'   <title>{title}</title>\n')
                 output.write('   <ns>10</ns>\n')
                 output.write('   <text>')
-                for line in page:
-                    output.write(line)
+                for p_line in page:
+                    output.write(p_line)
                 output.write('   </text>\n')
                 output.write('</page>\n')
             page = []
@@ -264,10 +264,9 @@ def decode_open(filename, mode='rt', encoding='utf-8'):
     if ext == '.gz':
         import gzip
         return gzip.open(filename, mode, encoding=encoding)
-    elif ext == '.bz2':
+    if ext == '.bz2':
         return bz2.open(filename, mode=mode, encoding=encoding)
-    else:
-        return open(filename, mode, encoding=encoding)
+    return open(filename, mode, encoding=encoding)
 
 
 def process_dump(input_file, template_file, out_file, file_size, file_compress,
@@ -283,9 +282,9 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     :param expand_templates: whether to exapnd templates.
     :param n_articles: how many articles to process; process all if 0.
     """
-    global knownNamespaces
-    global templateNamespace, templatePrefix
-    global moduleNamespace, modulePrefix
+    global known_namespaces
+    global template_namespace, template_prefix
+    global module_namespace, module_prefix
 
     urlbase = ''                # This is obtained from <siteinfo>
 
@@ -293,7 +292,7 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
 
     # collect siteinfo
     for line in input:
-        line = line #.decode('utf-8')
+        # line = line.decode('utf-8')
         m = tagRE.search(line)
         if not m:
             continue
@@ -304,13 +303,13 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
             base = m.group(3)
             urlbase = base[:base.rfind("/")]
         elif tag == 'namespace':
-            knownNamespaces.add(m.group(3))
+            known_namespaces.add(m.group(3))
             if re.search('key="10"', line):
-                templateNamespace = m.group(3)
-                templatePrefix = templateNamespace + ':'
+                template_namespace = m.group(3)
+                template_prefix = template_namespace + ':'
             elif re.search('key="828"', line):
-                moduleNamespace = m.group(3)
-                modulePrefix = moduleNamespace + ':'
+                module_namespace = m.group(3)
+                module_prefix = module_namespace + ':'
         elif tag == '/siteinfo':
             break
 
@@ -336,10 +335,10 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     if out_file == '-':
         output = sys.stdout
         if file_compress:
-            logging.warn("writing to stdout, so no output compression (use an external tool)")
+            logging.warning("writing to stdout, so no output compression (use an external tool)")
     else:
-        nextFile = NextFile(out_file)
-        output = OutputSplitter(nextFile, file_size, file_compress)
+        next_file = NextFile(out_file)
+        output = OutputSplitter(next_file, file_size, file_compress)
 
     # process pages
     logging.info("Starting page extraction from %s.", input_file)
@@ -382,11 +381,11 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     revid = ''
     last_id = ''
     ordinal = 0  # page count
-    inText = False
+    in_text = False
     redirect = False
     for line in input:
         if '<' not in line:  # faster than doing re.search()
-            if inText:
+            if in_text:
                 page.append(line)
             continue
         m = tagRE.search(line)
@@ -405,25 +404,27 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
         elif tag == 'redirect':
             redirect = True
         elif tag == 'text':
-            inText = True
+            in_text = True
             line = line[m.start(3):m.end(3)]
             page.append(line)
             if m.lastindex == 4:  # open-close
-                inText = False
+                in_text = False
         elif tag == '/text':
             if m.group(1):
                 page.append(m.group(1))
-            inText = False
-        elif inText:
+            in_text = False
+        elif in_text:
             page.append(line)
         elif tag == '/page':
             colon = title.find(':')
-            if (colon < 0 or (title[:colon] in acceptedNamespaces)) and (id != last_id and
-                    not redirect and not title.startswith(templateNamespace)):
+            if (colon < 0 or (title[:colon] in accepted_namespaces)) and (id != last_id and
+                    not redirect and not title.startswith(template_namespace)):
                 job = (id, revid, urlbase, title, page, ordinal)
                 jobs_queue.put(job)  # goes to any available extract_process
                 last_id = id
                 ordinal += 1
+
+                #TODO: kan ik de ordinal shared tussen processen maken? of maak van deze loop ook een process die doorgaat totdat ordinal == n_articles (of lelijk actheraf lege gwn verwijderen)
             id = ''
             revid = ''
             page = []
@@ -564,8 +565,7 @@ def wiki_extract(input: Union[Path, str], output: Union[Path, str]="-", # Requir
     ts_mode: bool, default = False
         Specific for Text Segmentation datasets, if True, filters out short segments and lines.
     """
-    global urlbase, acceptedNamespaces
-    global templateCache
+    global accepted_namespaces
 
     Extractor.keepLinks = keep_links
     Extractor.HtmlFormatting = html
@@ -587,7 +587,7 @@ def wiki_extract(input: Union[Path, str], output: Union[Path, str]="-", # Requir
         return
 
     if namespaces:
-        acceptedNamespaces = set(namespaces.split(','))
+        accepted_namespaces = set(namespaces.split(','))
 
     FORMAT = '%(levelname)s: %(message)s'
     logging.basicConfig(format=FORMAT)
@@ -602,10 +602,6 @@ def wiki_extract(input: Union[Path, str], output: Union[Path, str]="-", # Requir
 
     if not Extractor.keepLinks:
         ignoreTag('a')
-
-    # sharing cache of parser templates is too slow:
-    # manager = Manager()
-    # templateCache = manager.dict()
 
     if article:
         if templates:
@@ -635,11 +631,7 @@ def wiki_extract(input: Union[Path, str], output: Union[Path, str]="-", # Requir
 
     output_path = output
     if output_path != '-' and not os.path.isdir(output_path):
-        try:
-            os.makedirs(output_path)
-        except:
-            logging.error('Could not create: %s', output_path)
-            return
+        os.makedirs(output_path)
 
     process_dump(input_file, templates, output_path, file_size,
                  compress, process_count, html_safe, expand_templates, n_articles)
@@ -705,9 +697,7 @@ def main():
 
 
 if __name__ == '__main__':
-    from extract import Extractor, ignoreTag, define_template, acceptedNamespaces
+    from extract import Extractor, ignoreTag, define_template, accepted_namespaces # pylint: disable=import-error
     main()
 else:
-    from .extract import Extractor, ignoreTag, define_template, acceptedNamespaces
-
-
+    from .extract import Extractor, ignoreTag, define_template, accepted_namespaces

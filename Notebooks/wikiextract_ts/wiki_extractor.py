@@ -62,7 +62,7 @@ from pathlib import Path
 import re
 import sys
 from io import StringIO
-from multiprocessing import Queue, get_context, cpu_count
+from multiprocessing import Queue, Value, get_context, cpu_count
 from timeit import default_timer
 from typing import Union
 
@@ -355,8 +355,10 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     # output queue
     output_queue = Queue(maxsize=maxsize)
 
+    ordinal = Value('i', 0)
+
     # Reduce job that sorts and prints output
-    reduce = Process(target=reduce_process, args=(output_queue, output))
+    reduce = Process(name='reduce_process', target=reduce_process, args=(output_queue, output))
     reduce.start()
 
     # initialize jobs queue
@@ -365,9 +367,9 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     # start worker processes
     logging.info("Using %d extract processes.", process_count)
     workers = []
-    for _ in range(max(1, process_count)):
-        extractor = Process(target=extract_process,
-                            args=(jobs_queue, output_queue, html_safe))
+    for i in range(max(1, process_count)):
+        extractor = Process(name=f'extract_process{i}', target=extract_process,
+                            args=(jobs_queue, output_queue, ordinal, n_articles, html_safe))
         extractor.daemon = True  # only live while parent process lives
         extractor.start()
         workers.append(extractor)
@@ -380,7 +382,7 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     id = ''
     revid = ''
     last_id = ''
-    ordinal = 0  # page count
+    # ordinal = 0  # page count
     in_text = False
     redirect = False
     for line in input:
@@ -419,17 +421,18 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
             colon = title.find(':')
             if (colon < 0 or (title[:colon] in accepted_namespaces)) and (id != last_id and
                     not redirect and not title.startswith(template_namespace)):
-                job = (id, revid, urlbase, title, page, ordinal)
+                # job = (id, revid, urlbase, title, page, ordinal)
+                job = (id, revid, urlbase, title, page)
                 jobs_queue.put(job)  # goes to any available extract_process
                 last_id = id
-                ordinal += 1
+                # ordinal += 1
 
-                #TODO: kan ik de ordinal shared tussen processen maken? of maak van deze loop ook een process die doorgaat totdat ordinal == n_articles (of lelijk actheraf lege gwn verwijderen)
             id = ''
             revid = ''
             page = []
-            if n_articles != 0 and ordinal == n_articles:
-                break
+            with ordinal.get_lock():
+                if n_articles != 0 and ordinal.value >= n_articles:
+                    break
 
     input.close()
 
@@ -448,16 +451,16 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     if output != sys.stdout:
         output.close()
     extract_duration = default_timer() - extract_start
-    extract_rate = ordinal / extract_duration
+    extract_rate = ordinal.value-1 / extract_duration
     logging.info("Finished %d-process extraction of %d articles in %.1fs (%.1f art/s)",
-                 process_count, ordinal, extract_duration, extract_rate)
+                 process_count, ordinal.value-1, extract_duration, extract_rate) # Count goes one over
 
 
 # ----------------------------------------------------------------------
 # Multiprocess support
 
 
-def extract_process(jobs_queue, output_queue, html_safe):
+def extract_process1(jobs_queue, output_queue, html_safe):
     """Pull tuples of raw page content, do CPU/regex-heavy fixup, push finished text
     :param jobs_queue: where to get jobs.
     :param output_queue: where to queue extracted text for output.
@@ -467,9 +470,32 @@ def extract_process(jobs_queue, output_queue, html_safe):
         job = jobs_queue.get()  # job is (id, revid, urlbase, title, page, ordinal)
         if job:
             out = StringIO()  # memory buffer
-            Extractor(*job[:-1]).extract(out, html_safe)  # (id, urlbase, title, page)
+            Extractor(*job[:-1]).extract(out, html_safe)  # (id, revid, urlbase, title, page)
             text = out.getvalue()
             output_queue.put((job[-1], text))  # (ordinal, extracted_text)
+            out.close()
+        else:
+            break
+
+def extract_process(jobs_queue, output_queue, ordinal, max_count, html_safe):
+    """Pull tuples of raw page content, do CPU/regex-heavy fixup, push finished text
+    :param jobs_queue: where to get jobs.
+    :param output_queue: where to queue extracted text for output.
+    :html_safe: whether to convert entities in text to HTML.
+    """
+    while True:
+        job = jobs_queue.get()  # job is (id, revid, urlbase, title, page, ordinal)
+        if job:
+            out = StringIO()  # memory buffer
+            Extractor(*job).extract(out, html_safe)  # (id, revid, urlbase, title, page)
+            text = out.getvalue()
+            if text:
+                with ordinal.get_lock():
+                    if ordinal.value > max_count: # Last article doesnt get written, this fixes it (kinda)
+                        out.close()
+                        break
+                    output_queue.put((ordinal.value, text))  # (ordinal, extracted_text)
+                    ordinal.value += 1
             out.close()
         else:
             break
@@ -512,7 +538,7 @@ minFileSize = 200 * 1024
 
 def wiki_extract(input: Union[Path, str], output: Union[Path, str]="-", # Required arguments
     bytes="0", compress=False, json=False, # Output arguments (optional)
-    n_articles=0, keep_headers=True, headers_mark: str=None, html=False, keep_links=False, namespaces: str=None, templates: Union[Path, str]=None, expand_templates=True, html_safe=True, process_count=cpu_count()-1, # Processing arguments (optional)
+    n_articles=0, keep_headers=True, headers_mark: str="===", html=False, keep_links=False, namespaces: str=None, templates: Union[Path, str]=None, expand_templates=True, html_safe=True, process_count=cpu_count()-1, # Processing arguments (optional)
     quiet=True, debug=False, article=False, ts_mode=False # Special arguments (optional)
 ):
     """

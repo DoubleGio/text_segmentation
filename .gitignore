@@ -1,10 +1,11 @@
-Data
-.idea
+Notebooks/test123.py
+GraphSeg
+
+# Datasets
 ENWiki
 NLNews
 NLAuVi
 NLWiki
-Notebooks/test123.py
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

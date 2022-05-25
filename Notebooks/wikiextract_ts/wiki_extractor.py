@@ -109,21 +109,22 @@ class NextFile():
     Synchronous generation of next available file name.
     """
 
-    FILES_PER_DIR = 100
+    # FILES_PER_DIR = 100
 
     def __init__(self, path_name):
         self.path_name = path_name
-        self.dir_index = -1
+        # self.dir_index = -1
         self.file_index = -1
 
     def next(self):
-        self.file_index = (self.file_index + 1) % NextFile.FILES_PER_DIR
-        if self.file_index == 0:
-            self.dir_index += 1
-        dirname = self._dirname()
-        if not os.path.isdir(dirname):
-            os.makedirs(dirname)
-        return self._filepath()
+        # self.file_index = (self.file_index + 1) % NextFile.FILES_PER_DIR
+        self.file_index += 1
+        # if self.file_index == 0:
+        #     self.dir_index += 1
+        # dirname = self._dirname()
+        # if not os.path.isdir(dirname):
+        #     os.makedirs(dirname)
+        return os.path.join(self.path_name, f'wiki_{self.file_index}')
 
     def _dirname(self):
         char1 = self.dir_index % 26
@@ -131,7 +132,8 @@ class NextFile():
         return os.path.join(self.path_name, '%c%c' % (ord('A') + char2, ord('A') + char1))
 
     def _filepath(self):
-        return '%s/wiki_%02d' % (self._dirname(), self.file_index)
+        # return '%s/wiki_%02d' % (self._dirname(), self.file_index)
+        return f'wiki{self.file_index}'
 
 
 class OutputSplitter():
@@ -270,7 +272,7 @@ def decode_open(filename, mode='rt', encoding='utf-8'):
 
 
 def process_dump(input_file, template_file, out_file, file_size, file_compress,
-                 process_count, html_safe, expand_templates, n_articles=0):
+                 process_count, html_safe, expand_templates, max_n=0):
     """
     :param input_file: name of the wikipedia dump file; '-' to read from stdin
     :param template_file: optional file with template definitions.
@@ -280,7 +282,7 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     :param process_count: number of extraction processes to spawn.
     :param html_safe: whether to produce html-safe output.
     :param expand_templates: whether to exapnd templates.
-    :param n_articles: how many articles to process; process all if 0.
+    :param max_n: (up to) how many articles to process; process all if 0.
     """
     global known_namespaces
     global template_namespace, template_prefix
@@ -319,14 +321,14 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
         if template_file and os.path.exists(template_file):
             logging.info("Preprocessing '%s' to collect template definitions: this may take some time.", template_file)
             file = decode_open(template_file)
-            templates = load_templates(file, n_articles)
+            templates = load_templates(file, max_n)
             file.close()
         else:
             if input_file == '-':
                 # can't scan then reset stdin; must error w/ suggestion to specify template_file
                 raise ValueError("to use templates with stdin dump, must supply explicit template-file")
             logging.info("Preprocessing '%s' to collect template definitions: this may take some time.", input_file)
-            templates = load_templates(input, n_articles, template_file)
+            templates = load_templates(input, max_n, template_file)
             input.close()
             input = decode_open(input_file)
         template_load_elapsed = default_timer() - template_load_start
@@ -369,7 +371,7 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     workers = []
     for i in range(max(1, process_count)):
         extractor = Process(name=f'extract_process{i}', target=extract_process,
-                            args=(jobs_queue, output_queue, ordinal, n_articles, html_safe))
+                            args=(jobs_queue, output_queue, ordinal, max_n, html_safe))
         extractor.daemon = True  # only live while parent process lives
         extractor.start()
         workers.append(extractor)
@@ -431,7 +433,7 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
             revid = ''
             page = []
             with ordinal.get_lock():
-                if n_articles != 0 and ordinal.value >= n_articles:
+                if max_n != 0 and ordinal.value >= max_n:
                     break
 
     input.close()
@@ -451,7 +453,7 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     if output != sys.stdout:
         output.close()
     extract_duration = default_timer() - extract_start
-    extract_rate = ordinal.value-1 / extract_duration
+    extract_rate = (ordinal.value-1) / extract_duration
     logging.info("Finished %d-process extraction of %d articles in %.1fs (%.1f art/s)",
                  process_count, ordinal.value-1, extract_duration, extract_rate) # Count goes one over
 
@@ -538,7 +540,7 @@ minFileSize = 200 * 1024
 
 def wiki_extract(input: Union[Path, str], output: Union[Path, str]="-", # Required arguments
     bytes="0", compress=False, json=False, # Output arguments (optional)
-    n_articles=0, keep_headers=True, headers_mark: str="===", html=False, keep_links=False, namespaces: str=None, templates: Union[Path, str]=None, expand_templates=True, html_safe=True, process_count=cpu_count()-1, # Processing arguments (optional)
+    max_n=0, keep_headers=True, headers_mark: str="===", html=False, keep_links=False, namespaces: str=None, templates: Union[Path, str]=None, expand_templates=True, html_safe=True, process_count=cpu_count()-1, # Processing arguments (optional)
     quiet=True, debug=False, article=False, ts_mode=False # Special arguments (optional)
 ):
     """
@@ -560,7 +562,7 @@ def wiki_extract(input: Union[Path, str], output: Union[Path, str]="-", # Requir
         If True, write output in json format instead of the default <doc> format.
     
     Optional processing arguments
-    n_articles: int, default = 0,
+    max_n: int, default = 0,
         Number of articles to process. If 0, process all.
     keep_headers: bool, default = True
         If True, preserve headers.
@@ -660,7 +662,7 @@ def wiki_extract(input: Union[Path, str], output: Union[Path, str]="-", # Requir
         os.makedirs(output_path)
 
     process_dump(input_file, templates, output_path, file_size,
-                 compress, process_count, html_safe, expand_templates, n_articles)
+                 compress, process_count, html_safe, expand_templates, max_n)
 
 def main():
     parser = argparse.ArgumentParser(prog=os.path.basename(sys.argv[0]),
@@ -680,7 +682,7 @@ def main():
                         help="write output in json format instead of the default <doc> format")
 
     groupP = parser.add_argument_group('Processing')
-    groupP.add_argument("-n", "--n-articles", default=0,
+    groupP.add_argument("-n", "--max-n", default=0,
                         help="max amount of articles to process; process all for 0")
     groupP.add_argument("-rh", "--remove-headers", action="store_false",
                         help="whether to remove the headers")
@@ -718,7 +720,7 @@ def main():
 
     wiki_extract(input=args.input, output=args.output, 
         bytes=args.bytes, compress=args.compress, json=args.json, 
-        n_articles=args.n_articles, keep_headers=not args.remove_headers, headers_mark=args.headers_mark, html=args.html, keep_links=args.links, namespaces=args.namespaces, templates=args.templates, expand_templates=not args.no_templates, html_safe=args.html_safe, process_count=args.process_count,
+        max_n=args.n_articles, keep_headers=not args.remove_headers, headers_mark=args.headers_mark, html=args.html, keep_links=args.links, namespaces=args.namespaces, templates=args.templates, expand_templates=not args.no_templates, html_safe=args.html_safe, process_count=args.process_count,
         quiet=args.quiet, debug=args.debug, article=args.article, ts_mode=args.ts_mode)
 
 

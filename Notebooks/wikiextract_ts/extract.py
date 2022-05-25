@@ -102,7 +102,7 @@ def ts_filter(text: List[str]) -> List[str]:
         elif len(line) >= MIN_LINE_LEN:
             seg.append(line)
         i += 1
-    return res if n_seg > 1 else []
+    return res if 11 > n_seg > 1 else [] # Filter out texts with more than 10 or only 1 segment
 
 
 

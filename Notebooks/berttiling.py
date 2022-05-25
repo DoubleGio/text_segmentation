@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 from typing import List, Union, Tuple
+from utils import compute_metrics
 from nltk.tokenize import sent_tokenize
-from nltk.metrics.segmentation import pk, windowdiff
 from transformers import RobertaConfig, RobertaTokenizer, RobertaModel
+from matplotlib import pyplot as plt
 import numpy as np
 import torch
 
@@ -40,25 +41,21 @@ class BertTiling:
         self.smoothing_passes = smoothing_passes
         self.smoothing_width = smoothing_width
 
-    def evaluate(self, input: Union[str, List[str]], labels: List[int]) -> Tuple[float, float]:
+    def evaluate(self, input: Union[str, List[str]], ground_truth: List[int]):
         """
-        Parameters:
-        ===========
-        input:  str or List[str]
-                List of sententces
-        labels: List[int]
-                List of binary labels, for each sentence.
+        Takes (list of) sentences, segments it, plots the results and prints the pk and windowdiff scores.
         """
         if isinstance(input, str):
             input = sent_tokenize(input)
+        res = self.topic_segmentation_bert(input, return_all=True)
+        self.plot(*res, ground_truth)
+        pk, wd = compute_metrics([1] + res[-1], ground_truth) # Add 1 to start of predictions to signify start of text (which counts as boundary)
+        print(f'Pk-score      = {pk:.3}')
+        print(f'Windiff-score = {wd:.3}')
 
-        predicted_segmentations = self.topic_segmentation_bert(input)
-
-        return compute_metrics(predicted_segmentations, labels)
-
-    def topic_segmentation_bert(self, input: Union[str, List[str]]) -> List[int]:
+    def topic_segmentation_bert(self, input: Union[str, List[str]], return_all=False) -> List[int]:
         """
-        Takes list of sentences and produces predictions.
+        Takes list of sentences and produces list of binary predictions.
         """
         if isinstance(input, str):
             input = sent_tokenize(input)
@@ -73,9 +70,44 @@ class BertTiling:
         block_score = self._block_comparion(features)
         block_score_smooth = self._smooth_scores(block_score)
 
-        depth = self._depth_calc(block_score_smooth)
-        predictions = self._identify_boundaries(depth)
+        depth_score = self._depth_calc(block_score_smooth)
+        predictions = self._identify_boundaries(depth_score)
+        if return_all:
+            return block_score, block_score_smooth, depth_score, predictions
         return predictions
+
+    def plot(
+        self,
+        block_s: List[float],
+        smooth_s: List[float],
+        depth_s: List[float],
+        boundaries: List[int],
+        ground_truth: List[int]
+    ):
+        """
+        Plots scores, predictions and ground truth PER SENTENCE.
+        The scores represent the score of sentence GAPS: a boundary score of 1 at i=0 means that a boundary occurs between sentences 0 and 1.
+        Hence the scores are shifted to the right to allign with the next sentence.
+        """
+        # Shift to the right
+        block_s = [0] + block_s
+        smooth_s = [0] + smooth_s
+        depth_s = [0] + depth_s
+        boundaries = [1] + boundaries # We consider the start of a text as a boundary
+
+        # Make the plot
+        fig, ax = plt.subplots(figsize=(20,5),)
+        ax.set_xlabel("Sentence index")
+        ax.set_ylabel("Scores")
+        ax.set_ylim(0, 1)
+        ax.plot(block_s, label="Gap Scores", color='b')
+        ax.plot(smooth_s, label="Smoothed Gap scores", color='g')
+        ax.plot(depth_s, label="Depth scores", color='y')
+        ax.vlines(range(len(ground_truth)), ymin=0, ymax=ground_truth, color='r', label="Ground Truth")
+        _, _, baseline = ax.stem(boundaries, linefmt='--', markerfmt=' ', label="Predicted boundaries")
+        plt.setp(baseline, color='k', alpha=0.5)
+        ax.legend()
+        fig.show()
 
     def _block_comparion(self, features: List[torch.Tensor]) -> List[float]:
         """
@@ -88,13 +120,13 @@ class BertTiling:
 
         for curr_gap in range(num_gaps):
             # adjust window size for boundary conditions
-            if curr_gap < self.k - 1:
+            if curr_gap < self.k - 1 and num_gaps - curr_gap > curr_gap:
                 window_size = curr_gap + 1
             elif curr_gap > num_gaps - self.k:
                 window_size = num_gaps - curr_gap
             else:
                 window_size = self.k
-
+            
             b1 = self._compute_window(features, curr_gap - window_size + 1, curr_gap + 1)
             b2 = self._compute_window(features, curr_gap + 1, curr_gap + window_size + 1)
             gap_scores.append(float(similarity_metric(b1[0], b2[0])))
@@ -205,25 +237,6 @@ class BertTiling:
             l[i * k + min(i, m) : (i + 1) * k + min(i + 1, m)]
             for i in range(min(len(l), n))
         )
-
-# TODO: put this in utils.py
-def compute_metrics(predictions: List[int], ground_truth: List[int]) -> Tuple[float, float]:
-    """
-    Turns predictions/ground_truth List[int] into Strings for nltk pk & windowdiff functions.
-    >>> [1,0,1] --> "101"
-    Returns pk and windowdiff scores.
-    """
-    # Turn List[int] into String
-    # [1,0,1] --> "101"
-    predictions = "".join(map(str, predictions))
-    ground_truth = "".join(map(str, ground_truth))
-
-    pk_score = pk(ground_truth, predictions)
-    windiff_score = windowdiff(ground_truth, predictions, k=int(round(len(ground_truth) / (ground_truth.count("1") * 2.0))))
-    print(f'Pk      = {pk_score}')
-    print(f'Windiff = {windiff_score}')
-    return pk_score, windiff_score
-
 
 # Pasted from the SciPy cookbook: https://scipy-cookbook.readthedocs.io/items/SignalSmooth.html
 def smooth(x, window_len=11, window='flat'):

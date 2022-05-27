@@ -5,8 +5,8 @@ from nltk.metrics.segmentation import pk, windowdiff
 
 ENWIKI_LOC = '../ENWiki/data'
 NLWIKI_LOC = '../NLWiki/data'
-NLNEWS_LOC = '../NLNews/data_2404-1301'
-NLAUVI_LOC = '../NLAuVi/data_2604-1516'
+NLNEWS_LOC = '../NLNews/data'
+NLAUVI_LOC = '../NLAuVi/data'
 SECTION_MARK = '==='
 
 def clean_text(text: str, mark_sections=False) -> str:
@@ -42,6 +42,17 @@ def compute_metrics(predictions: List[int], ground_truth: List[int], k: Optional
         print(f'Pk      = {pk_score}')
         print(f'Windiff = {windiff_score}')
     return pk_score, windiff_score
+
+def get_all_file_names(root: str) -> List[str]:
+    """
+    Return a list of all files in a directory and its subdirectories.
+    """
+    return [
+        os.path.join(root, file) 
+        for root, _, files in os.walk(root) 
+        for file in files 
+        if os.path.isfile(os.path.join(root, file))
+    ]
 
 def get_truth(clean_text: Union[str, List[str]]) -> List[int]:
     """

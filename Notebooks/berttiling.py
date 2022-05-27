@@ -20,7 +20,7 @@ class BertTiling:
         smoothing_width=2,
         cutoff_policy='HC',
         language='en'
-    ):
+    ) -> None:
         if cutoff_policy in ['HC', 'LC']:
             self.cutoff_policy = cutoff_policy
         else:

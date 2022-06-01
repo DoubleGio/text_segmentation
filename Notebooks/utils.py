@@ -3,10 +3,11 @@ from typing import List, Optional, Union, Tuple
 from nltk.tokenize import sent_tokenize
 from nltk.metrics.segmentation import pk, windowdiff
 
-ENWIKI_LOC = '../ENWiki/data'
-NLWIKI_LOC = '../NLWiki/data'
-NLNEWS_LOC = '../NLNews/data'
-NLAUVI_LOC = '../NLAuVi/data'
+ENWIKI_LOC = '../Datasets/ENWiki/data'
+NLWIKI_LOC = '../Datasets/NLWiki/data'
+NLNEWS_LOC = '../Datasets/NLNews/data'
+NLAUVI_LOC_C = '../Datasets/NLAuVi/data_concat'
+NLAUVI_LOC_N = '../Datasets/NLAuVi/data_normal'
 SECTION_MARK = '==='
 
 def clean_text(text: str, mark_sections=False) -> str:
@@ -21,6 +22,15 @@ def clean_text(text: str, mark_sections=False) -> str:
     else:
         t = re.sub(r'^=+.*\n+', '', t, flags=re.MULTILINE)
     return t
+
+def sectioned_clean_text(text: str) -> List[str]:
+    """
+    Removes wiki-header and footer.
+    Split text into sections (without header marks).
+    """
+    t = re.sub(r'^(?:(<doc)|(\n<\/doc)).*\n+', '', text, flags=re.MULTILINE)
+    split = re.split(r'^=+.*\n+', t, flags=re.MULTILINE)
+    return list(filter(None, split))
 
 def compute_metrics(predictions: List[int], ground_truth: List[int], k: Optional[int] = None, quiet=True) -> Tuple[float, float]:
     """

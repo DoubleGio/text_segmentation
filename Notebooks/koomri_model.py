@@ -1,11 +1,12 @@
 import torch
 import torch.nn as nn
-from torch.autograd import Variable
+# from torch.autograd import Variable
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 import numpy as np
 import logging
 
+# TODO: Remove the commented out code.
 
 # logger = setup_logger(__name__, 'train.log')
 # profilerLogger = setup_logger("profilerLogger", 'profiler.log', True)
@@ -14,13 +15,18 @@ device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cp
 
 def zero_state(module, batch_size):
     # * 2 is for the two directions
-    return Variable(torch.zeros(module.num_layers * 2, batch_size, module.hidden).to(device)), \
-           Variable(torch.zeros(module.num_layers * 2, batch_size, module.hidden).to(device))
+    # return Variable(torch.zeros(module.num_layers * 2, batch_size, module.hidden).to(device)), \
+    #        Variable(torch.zeros(module.num_layers * 2, batch_size, module.hidden).to(device))
+    return torch.zeros(module.num_layers * 2, batch_size, module.hidden).to(device), torch.zeros(module.num_layers * 2, batch_size, module.hidden).to(device)
 
 
 class SentenceEncodingRNN(nn.Module):
+    """
+    Model for sentence encoding.
+    """
     def __init__(self, input_size=300, hidden=256, num_layers=2):
-        super(SentenceEncodingRNN, self).__init__()
+        super().__init__()
+
         self.num_layers = num_layers
         self.hidden = hidden
         self.input_size = input_size
@@ -36,16 +42,22 @@ class SentenceEncodingRNN(nn.Module):
         packed_output, _ = self.lstm(x, s)
         padded_output, lengths = pad_packed_sequence(packed_output) # (max sentence len, batch, 256) 
 
-        maxes = Variable(torch.zeros(batch_size, padded_output.size(2)).to(device))
+        # maxes = Variable(torch.zeros(batch_size, padded_output.size(2)).to(device))
+        maxes = torch.zeros(batch_size, padded_output.size(2)).to(device)
         for i in range(batch_size):
             maxes[i, :] = torch.max(padded_output[:lengths[i], i, :], 0)[0]
 
         return maxes
 
 
-class Model(nn.Module):
+class TS_Model(nn.Module):
+    """
+    Model for Text Segmentation.
+    """
+    criterion = nn.CrossEntropyLoss()
+
     def __init__(self, sentence_encoder, hidden=128, num_layers=2):
-        super(Model, self).__init__()
+        super().__init__()
 
         self.sentence_encoder = sentence_encoder
         self.sentence_lstm = nn.LSTM(input_size=sentence_encoder.hidden * 2,
@@ -61,12 +73,10 @@ class Model(nn.Module):
         self.num_layers = num_layers
         self.hidden = hidden
 
-        self.criterion = nn.CrossEntropyLoss()
-
-
     def pad(self, s, max_length):
         s_length = s.size()[0]
-        v = Variable(s.unsqueeze(0).unsqueeze(0).to(device))
+        # v = Variable(s.unsqueeze(0).unsqueeze(0).to(device))
+        v = s.unsqueeze(0).unsqueeze(0)
         padded = F.pad(v, (0, 0, 0, max_length - s_length))  # (1, 1, max_length, 300)
         shape = padded.size()
         return padded.view(shape[2], 1, shape[3])  # (max_length, 1, 300)
@@ -100,7 +110,8 @@ class Model(nn.Module):
         big_tensor = torch.cat(padded_sentences, 1)  # (max_length, batch size, 300)
         packed_tensor = pack_padded_sequence(big_tensor, sorted_lengths)
         encoded_sentences = self.sentence_encoder(packed_tensor)
-        unsort_order = Variable(torch.LongTensor(unsort(sort_order)).to(device))
+        # unsort_order = Variable(torch.LongTensor(unsort(sort_order)).to(device))
+        unsort_order = torch.LongTensor(unsort(sort_order)).to(device)
         unsorted_encodings = encoded_sentences.index_select(0, unsort_order)
 
         index = 0
@@ -139,10 +150,10 @@ def unsort(sort_order):
 
     return result
 
-def create_model(use_cuda=True) -> Model:
-    """Create a new model instance. Uses cuda if available, unless use_cuda=False."""
+def create_model(use_cuda=True) -> TS_Model:
+    """Create a new TS_Model instance. Uses cuda if available, unless use_cuda=False."""
     if not use_cuda:
         global device
         device = torch.device("cpu")
     sentence_encoder = SentenceEncodingRNN(input_size=300, hidden=256, num_layers=2)
-    return Model(sentence_encoder, hidden=256, num_layers=2).to(device)
+    return TS_Model(sentence_encoder, hidden=256, num_layers=2).to(device)

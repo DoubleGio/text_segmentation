@@ -11,7 +11,7 @@ import logging
 # logger = setup_logger(__name__, 'train.log')
 # profilerLogger = setup_logger("profilerLogger", 'profiler.log', True)
 
-device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def zero_state(module, batch_size):
     # * 2 is for the two directions
@@ -56,9 +56,8 @@ class TS_Model(nn.Module):
     """
     criterion = nn.CrossEntropyLoss()
 
-    def __init__(self, sentence_encoder, hidden=128, num_layers=2):
+    def __init__(self, sentence_encoder: SentenceEncodingRNN, hidden=128, num_layers=2):
         super().__init__()
-
         self.sentence_encoder = sentence_encoder
         self.sentence_lstm = nn.LSTM(input_size=sentence_encoder.hidden * 2,
                                      hidden_size=hidden,
@@ -69,7 +68,6 @@ class TS_Model(nn.Module):
 
         # We have two labels
         self.h2s = nn.Linear(hidden * 2, 2)
-
         self.num_layers = num_layers
         self.hidden = hidden
 
@@ -90,57 +88,63 @@ class TS_Model(nn.Module):
         return padded.view(shape[2], 1, shape[3])  # (max_length, 1, 300)
 
     def forward(self, batch):
-        batch_size = len(batch)
-
-        sentences_per_doc = []
-        all_batch_sentences = []
+        doc_lengths = [] # number of sentences in each document
+        all_sentences = [] # list of all sentences for all documents
         for document in batch:
-            all_batch_sentences.extend(document)
-            sentences_per_doc.append(len(document))
+            doc_lengths.append(len(document))
+            all_sentences.extend(document)
 
-        lengths = [s.size()[0] for s in all_batch_sentences]
-        sort_order = np.argsort(lengths)[::-1]
-        sorted_sentences = [all_batch_sentences[i] for i in sort_order]
+        # Sort the sentences on length from big to small
+        sent_lengths = [s.size()[0] for s in all_sentences] # number of words in each sentence
+        sort_order = np.argsort(sent_lengths)[::-1]
+        sorted_sentences = [all_sentences[i] for i in sort_order]
         sorted_lengths = [s.size()[0] for s in sorted_sentences]
 
-        max_length = max(lengths)
-        logging.debug(f'Num sentences: {sum(sentences_per_doc)}, max sentence length: {max_length}')
-
+        # Pad and concatenate the sentences
+        max_length = max(sent_lengths)
         padded_sentences = [self.pad(s, max_length) for s in sorted_sentences]
         big_tensor = torch.cat(padded_sentences, 1)  # (max_length, batch size, 300)
         packed_tensor = pack_padded_sequence(big_tensor, sorted_lengths)
+
+        # Encode the sentences and unsort
         encoded_sentences = self.sentence_encoder(packed_tensor)
-        # unsort_order = Variable(torch.LongTensor(unsort(sort_order)).to(device))
         unsort_order = torch.LongTensor(unsort(sort_order)).to(device)
         unsorted_encodings = encoded_sentences.index_select(0, unsort_order)
 
+        # Seperate sentences back into encoded documents
         index = 0
         encoded_documents = []
-        for sentences_count in sentences_per_doc:
+        for sentences_count in doc_lengths:
             end_index = index + sentences_count
             encoded_documents.append(unsorted_encodings[index : end_index, :])
             index = end_index
 
-        doc_sizes = [doc.size()[0] for doc in encoded_documents]
-        max_doc_size = np.max(doc_sizes)
-        ordered_document_idx = np.argsort(doc_sizes)[::-1]
-        ordered_doc_sizes = sorted(doc_sizes)[::-1]
+        # Sort the documents
+        max_doc_size = np.max(doc_lengths)
+        ordered_document_idx = np.argsort(doc_lengths)[::-1]
+        ordered_doc_sizes = sorted(doc_lengths)[::-1]
         ordered_documents = [encoded_documents[idx] for idx in ordered_document_idx]
+
+        # Pad and concatenate the documents
         padded_docs = [self.pad_document(d, max_doc_size) for d in ordered_documents]
         docs_tensor = torch.cat(padded_docs, 1)
         packed_docs = pack_padded_sequence(docs_tensor, ordered_doc_sizes)
-        sentence_lstm_output, _ = self.sentence_lstm(packed_docs, zero_state(self, batch_size=batch_size))
+
+        # Encode each document
+        sentence_lstm_output, _ = self.sentence_lstm(packed_docs, zero_state(self, batch_size=len(batch)))
         padded_x, _ = pad_packed_sequence(sentence_lstm_output)  # (max sentence len, batch, 256)
 
+        # Seperate the documents again
         doc_outputs = []
         for i, doc_len in enumerate(ordered_doc_sizes):
-            doc_outputs.append(padded_x[0:doc_len - 1, i, :])  # -1 to remove last prediction
-
+            # -1 to remove last prediction, since the predictions denote the END of segments, 
+            # so the last prediction is not needed.
+            doc_outputs.append(padded_x[0:doc_len - 1, i, :])
+        
+        # Unsort and put through linear layer for outputs
         unsorted_doc_outputs = [doc_outputs[i] for i in unsort(ordered_document_idx)]
         sentence_outputs = torch.cat(unsorted_doc_outputs, 0)
-
-        x = self.h2s(sentence_outputs)
-        return x
+        return self.h2s(sentence_outputs)
 
 def unsort(sort_order):
     result = [-1] * len(sort_order)

@@ -1,5 +1,7 @@
-import re, os, shutil
-from typing import List, Optional, Union, Tuple
+import re, os, shutil, logging
+from functools import partial, partialmethod
+from tqdm import tqdm
+from typing import List, Optional, Union, Tuple, Iterable
 from nltk.tokenize import sent_tokenize
 from nltk.metrics.segmentation import pk, windowdiff
 
@@ -32,12 +34,28 @@ def sectioned_clean_text(text: str) -> List[str]:
     split = re.split(r'^=+.*\n+', t, flags=re.MULTILINE)
     return list(filter(None, split))
 
-def compute_metrics(predictions: List[int], ground_truth: List[int], k: Optional[int] = None, quiet=True) -> Tuple[float, float]:
+def compute_metrics(predictions: Iterable[int], ground_truth: Iterable[int], k: Optional[int] = None, quiet=True) -> Tuple[float, float]:
     """
-    Turns predictions/ground_truth List[int] into Strings for nltk pk & windowdiff functions.
+    Turns predictions/ground_truth Iterable[int] into Strings for use in nltk pk & windowdiff functions.
     >>> [1,0,1] --> "101"
     Returns pk and windowdiff scores.
     """
+    def try_iter_to_list(x):
+        try:
+            return x.tolist()
+        except AttributeError:
+            pass
+        try:
+            return list(x)
+        except TypeError:
+            raise TypeError(f"{x} is not iterable.")
+
+    if len(predictions) != len(ground_truth):
+        raise ValueError("Predictions and ground truth must have same length.")
+
+    if not isinstance(predictions, list): predictions = try_iter_to_list(predictions)
+    if not isinstance(ground_truth, list): ground_truth = try_iter_to_list(ground_truth)
+    
     # Turn List[int] into String
     # [1,0,1] --> "101"
     predictions = "".join(map(str, predictions))
@@ -53,13 +71,13 @@ def compute_metrics(predictions: List[int], ground_truth: List[int], k: Optional
         print(f'Windiff = {windiff_score}')
     return pk_score, windiff_score
 
-def get_all_file_names(root: str) -> List[str]:
+def get_all_file_names(dir: str) -> List[str]:
     """
     Return a list of all files in a directory and its subdirectories.
     """
     return [
         os.path.join(root, file) 
-        for root, _, files in os.walk(root) 
+        for root, _, files in os.walk(dir) 
         for file in files 
         if os.path.isfile(os.path.join(root, file))
     ]
@@ -96,3 +114,47 @@ def subdivide_dir(root: str, N=1000):
                 os.mkdir(subdir_name)
         shutil.move(os.path.join(root, file), os.path.join(subdir_name, file))
 
+class LoggingHandler(logging.Handler):
+
+    def __init__(self, use_tqdm=False, level = logging.NOTSET) -> None:
+        super().__init__(level)
+        self.use_tqdm = use_tqdm
+
+        # Initialize custom 'result' logging level
+        logging.RESULT = logging.INFO + 5
+        logging.addLevelName(logging.RESULT, "RESULT")
+        logging.Logger.result = partialmethod(logging.Logger.log, logging.RESULT)
+        logging.result = partial(logging.log, logging.RESULT)
+
+        # Initialize colours
+        grey = "\x1b[38;20m"
+        bold_green = "\x1b[32;1m"
+        yellow = "\x1b[33;20m"
+        red = "\x1b[31;20m"
+        bold_red = "\x1b[31;1m"
+        reset = "\x1b[0m"
+        fmt = "%(asctime)s - %(levelname)s - %(message)s"
+        self.FORMATS = {
+            logging.DEBUG: grey + fmt + reset,
+            logging.INFO: grey + fmt + reset,
+            logging.RESULT: bold_green + fmt + reset,
+            logging.WARNING: yellow + fmt + reset,
+            logging.ERROR: red + fmt + reset,
+            logging.CRITICAL: bold_red + fmt + reset
+        }
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if self.use_tqdm:
+            try:
+                msg = self.format(record)
+                tqdm.write(msg)
+                self.flush()
+            except Exception:
+                self.handleError(record)
+        else:
+            super().emit(record)
+
+    def format(self, record: logging.LogRecord) -> str:
+        log_fmt = self.FORMATS.get(record.levelno)
+        formatter = logging.Formatter(log_fmt)
+        return formatter.format(record)

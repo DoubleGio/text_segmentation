@@ -11,6 +11,7 @@ PARALLEL_INFERENCE_INSTANCES = 20
 
 class BertTiling:
     """
+    Updated implementation of https://github.com/gdamaskinos/unsupervised_topic_segmentation.
     """
 
     def __init__(

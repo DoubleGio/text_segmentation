@@ -1,12 +1,7 @@
 Notebooks/test123.py
 GraphSeg
-word2vec-nl-combined-160.tar.gz
-
-# Datasets
-ENWiki
-NLNews
-NLAuVi
-NLWiki
+SECTOR-master
+Datasets
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

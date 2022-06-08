@@ -1,10 +1,12 @@
 import logging, os
-from text_segmentation.Notebooks.textseg_model import create_model
+# from text_segmentation.Notebooks.textseg2_model import create_model
+from textseg2_model import create_model, supervised_cross_entropy
 import gensim.downloader as gensim_api
 from gensim.models import KeyedVectors
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import confusion_matrix, f1_score, accuracy_score
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from typing import List, Optional, Tuple, Union
@@ -60,6 +62,8 @@ class TextSeg2:
             bert_model = BertModel.from_pretrained('GroNLP/bert-base-dutch-cased')
         elif language == 'test':
             word2vec = None
+            bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+            bert_model = BertModel.from_pretrained('bert-base-uncased')
         else:
             raise ValueError(f"Language {language} not supported, try 'en' or 'nl' instead.")
 
@@ -123,18 +127,29 @@ class TextSeg2:
     def train(self, model, optimizer) -> None:
         model.train()
         total_loss = 0.0
-        with tqdm(desc='Training', total=len(self.train_loader), leave=False) as pbar:
+        with tqdm(desc='Training', total=len(self.train_loader)*self.train_loader.batch_size, leave=False) as pbar:
             for data, labels, bert_sents in self.train_loader:
                 model.zero_grad()
-                output, sims = model(data, sent_bert_vec) # TODO: implement new model
+                output, sim_scores = model(data, bert_sents)
                 target_var = torch.cat(labels, dim=0).to(device)
-                loss = model.criterion(output, target_var)
+
+                # Generate the ground truth for coherence scores...
+                target_list = target_var.cpu().detach().numpy() # convert to numpy array
+                target_coh = []
+                for t in target_list:
+                    if t == 0:
+                        target_coh.append(1)
+                    else:
+                        target_coh.append(0)
+                target_coh = torch.LongTensor(target_coh).to(device)
+
+                loss = supervised_cross_entropy(output, sim_scores, target_var, target_coh)
                 loss.backward()
                 optimizer.step()
                 total_loss += loss.item()
 
                 pbar.set_postfix(loss=loss.item())
-                pbar.update(1)
+                pbar.update(len(data))
         avg_loss = total_loss / len(self.train_loader) # Average loss per input.
         logger.info(f"Training Epoch {self.current_epoch + 1} --- Loss = {avg_loss:.4}")
         writer.add_scalar('Loss/Train', avg_loss, self.current_epoch + 1)
@@ -145,10 +160,10 @@ class TextSeg2:
         thresholds = np.arange(0, 1, 0.05)
         scores = {k: [] for k in thresholds} # (pk, windowdiff) scores for each threshold.
 
-        with tqdm(desc="Validating", total=len(self.val_loader), leave=False) as pbar:
-            for data, labels in self.val_loader:
-                output = model(data)
-                output_softmax = torch.nn.functional.softmax(output, dim=1)
+        with tqdm(desc="Validating", total=len(self.val_loader)*self.val_loader.batch_size, leave=False) as pbar:
+            for data, labels, bert_sents in self.val_loader:
+                output = model(data, bert_sents)
+                output_softmax = F.softmax(output, dim=1)
                 output_softmax = output_softmax.cpu().detach().numpy() # convert to numpy array.
 
                 # Calculate the Pk and windowdiff per document (in this batch) and append to scores for each threshold.
@@ -159,7 +174,7 @@ class TextSeg2:
                         pk, wd = compute_metrics(doc_prediction, doc_labels)
                         scores[threshold].append((pk, wd))
                     doc_start_idx += len(doc_labels)
-                pbar.update(1)
+                pbar.update(len(data))
         # tn, fp, fn, tp = cm.ravel()
         epoch_best = [np.inf, np.inf] # (pk, windowdiff)
         best_threshold: float = None
@@ -174,10 +189,10 @@ class TextSeg2:
     def test(self, model, threshold: float) -> Tuple[float, float]:
         model.eval()
         scores = []
-        with tqdm(desc='Testing', total=len(self.test_loader), leave=False) as pbar:
-            for data, labels in self.test_loader:
-                output = model(data)
-                output_softmax = torch.nn.functional.softmax(output, dim=1)
+        with tqdm(desc='Testing', total=len(self.test_loader)*self.test_loader.batch_size, leave=False) as pbar:
+            for data, labels, bert_sents in self.test_loader:
+                output = model(data, bert_sents)
+                output_softmax = F.softmax(output, dim=1)
                 output_softmax = output_softmax.cpu().detach().numpy() # convert to numpy array.
 
                 # Calculate the Pk and windowdiff per document (in this batch) for the specified threshold.
@@ -187,7 +202,7 @@ class TextSeg2:
                     pk, wd = compute_metrics(doc_prediction, doc_labels)
                     scores.append((pk, wd))
                     doc_start_idx += len(doc_labels)
-                pbar.update(1)
+                pbar.update(len(data))
         epoch_pk, epoch_wd = np.mean(scores, axis=0) # (pk, windowdiff) average for this threshold, over all docs.
         logger.info(f"Testing Epoch {self.current_epoch + 1} --- For threshold = {threshold:.4}, Pk = {epoch_pk:.4}, windowdiff = {epoch_wd:.4}")
         return epoch_pk, epoch_wd
@@ -215,7 +230,7 @@ def custom_collate(batch):
 class TS_Dataset2(Dataset):
     """
     Custom Text Segmentation Dataset class for use in Dataloaders.
-    Includes BERT sentence embeddings.
+    Includes BERT sentence embeddings. TODO: Precalculate embeddings?
     """
     def __init__(self, files: List[str], word2vec: KeyedVectors, bert_tokenizer: BertTokenizer, bert_model: BertModel, from_wiki=False) -> None:
         """
@@ -284,8 +299,8 @@ class TS_Dataset2(Dataset):
             tokenized = self.bert_tokenizer(batch, padding=True, return_tensors='pt') # Pad to max seq length in batch.
             # Hidden layers have a shape of (batch_size, max_seq_len, 768) - only the second-to-last layer is used.
             output_layer = self.bert_model(**tokenized, output_hidden_states=True).hidden_states[-2]
-            avg_pool = torch.nn.AvgPool2d(kernel_size=(output_layer.shape[1], 1)) # Take the average of the layer on the time axis.
-            bert_sents.append(avg_pool(output_layer).squeeze().detach())
+            avg_pool = torch.nn.AvgPool2d(kernel_size=(output_layer.shape[1], 1)) # Take the average of the layer on the time (sequence) axis.
+            bert_sents.append(avg_pool(output_layer).squeeze(dim=1).detach())
 
         return torch.cat(bert_sents).to(device) # shape = (len(sentences), 768)
 

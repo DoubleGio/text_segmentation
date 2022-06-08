@@ -5,6 +5,7 @@ from gensim.models import KeyedVectors
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import confusion_matrix, f1_score, accuracy_score
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from typing import List, Optional, Tuple
@@ -117,7 +118,7 @@ class TextSeg:
     def train(self, model, optimizer) -> None:
         model.train()
         total_loss = 0.0
-        with tqdm(desc='Training', total=len(self.train_loader), leave=False) as pbar:
+        with tqdm(desc='Training', total=len(self.train_loader)*self.train_loader.batch_size, leave=False) as pbar:
             for data, labels in self.train_loader:
                 model.zero_grad()
                 output = model(data)
@@ -128,7 +129,7 @@ class TextSeg:
                 total_loss += loss.item()
 
                 pbar.set_postfix(loss=loss.item())
-                pbar.update(1)
+                pbar.update(len(data))
         avg_loss = total_loss / len(self.train_loader) # Average loss per input.
         logger.info(f"Training Epoch {self.current_epoch + 1} --- Loss = {avg_loss:.4}")
         writer.add_scalar('Loss/Train', avg_loss, self.current_epoch + 1)
@@ -139,10 +140,10 @@ class TextSeg:
         thresholds = np.arange(0, 1, 0.05)
         scores = {k: [] for k in thresholds} # (pk, windowdiff) scores for each threshold.
 
-        with tqdm(desc="Validating", total=len(self.val_loader), leave=False) as pbar:
+        with tqdm(desc="Validating", total=len(self.val_loader)*self.val_loader.batch_size, leave=False) as pbar:
             for data, labels in self.val_loader:
                 output = model(data)
-                output_softmax = torch.nn.functional.softmax(output, dim=1)
+                output_softmax = F.softmax(output, dim=1)
                 output_softmax = output_softmax.cpu().detach().numpy() # convert to numpy array.
 
                 # Calculate the Pk and windowdiff per document (in this batch) and append to scores for each threshold.
@@ -153,7 +154,7 @@ class TextSeg:
                         pk, wd = compute_metrics(doc_prediction, doc_labels)
                         scores[threshold].append((pk, wd))
                     doc_start_idx += len(doc_labels)
-                pbar.update(1)
+                pbar.update(len(data))
         # tn, fp, fn, tp = cm.ravel()
         epoch_best = [np.inf, np.inf] # (pk, windowdiff)
         best_threshold: float = None
@@ -168,10 +169,10 @@ class TextSeg:
     def test(self, model, threshold: float) -> Tuple[float, float]:
         model.eval()
         scores = []
-        with tqdm(desc='Testing', total=len(self.test_loader), leave=False) as pbar:
+        with tqdm(desc='Testing', total=len(self.test_loader)*self.test_loader.batch_size, leave=False) as pbar:
             for data, labels in self.test_loader:
                 output = model(data)
-                output_softmax = torch.nn.functional.softmax(output, dim=1)
+                output_softmax = F.softmax(output, dim=1)
                 output_softmax = output_softmax.cpu().detach().numpy() # convert to numpy array.
 
                 # Calculate the Pk and windowdiff per document (in this batch) for the specified threshold.
@@ -181,7 +182,7 @@ class TextSeg:
                     pk, wd = compute_metrics(doc_prediction, doc_labels)
                     scores.append((pk, wd))
                     doc_start_idx += len(doc_labels)
-                pbar.update(1)
+                pbar.update(len(data))
         epoch_pk, epoch_wd = np.mean(scores, axis=0) # (pk, windowdiff) average for this threshold, over all docs.
         logger.info(f"Testing Epoch {self.current_epoch + 1} --- For threshold = {threshold:.4}, Pk = {epoch_pk:.4}, windowdiff = {epoch_wd:.4}")
         return epoch_pk, epoch_wd

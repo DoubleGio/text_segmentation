@@ -1,6 +1,6 @@
 import logging, os
-# from text_segmentation.Notebooks.textseg2_model import create_model
-from textseg2_model import create_model, supervised_cross_entropy
+from textseg2_model import create_model2, supervised_cross_entropy
+from textseg import TextSeg
 import gensim.downloader as gensim_api
 from gensim.models import KeyedVectors
 from sklearn.model_selection import train_test_split
@@ -12,8 +12,8 @@ from torch.utils.tensorboard import SummaryWriter
 from typing import List, Optional, Tuple, Union
 from tqdm import tqdm
 from nltk import regexp_tokenize, sent_tokenize
-from datetime import datetime
 import numpy as np
+from transformers import logging as tlogging
 from transformers import BertTokenizer, BertModel
 rng = np.random.default_rng()
 from utils import ENWIKI_LOC, NLWIKI_LOC, NLNEWS_LOC, NLAUVI_LOC_C, NLAUVI_LOC_N, get_all_file_names, sectioned_clean_text, compute_metrics, LoggingHandler
@@ -25,33 +25,32 @@ writer = SummaryWriter()
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 logger.addHandler(LoggingHandler(use_tqdm=True))
+tlogging.set_verbosity_error()
 
-class TextSeg2:
+
+class TextSeg2(TextSeg):
     """
     Updated implementation of https://github.com/koomri/text-segmentation.
-    Including the enhancements from https://github.com/lxing532/improve_topic_seg.
+    Extended with the enhancements from https://github.com/lxing532/improve_topic_seg.
     """
 
-    def __init__(
-        self,
-        language = 'en',
-        dataset_path = ENWIKI_LOC,
-        from_wiki: Optional[bool] = False,
-        splits = [0.8, 0.1, 0.1],
-        batch_size = 8,
-        num_workers = 0,
-        use_cuda = True,
-        load_from: Optional[str] = None,
-    ) -> None:
-        """
-        """
-        if not use_cuda:
-            global device
-            device = torch.device("cpu")
-            logger.info(f"Using device: {device}.")
-        else:
-            logger.info(f"Using device: {torch.cuda.get_device_name(device)}.")
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
 
+    # Override
+    def load_data(
+        self,
+        language: str,
+        dataset_path: str,
+        from_wiki: bool,
+        splits: List[float],
+        batch_size: int,
+        num_workers: int,
+        ) -> None:
+        """
+        Load the right pretrained models.
+        Shuffle and split the data, load it as TS_Datasets and put it into DataLoaders.
+        """
         if language == 'en':
             word2vec = gensim_api.load('word2vec-google-news-300')
             bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
@@ -67,13 +66,10 @@ class TextSeg2:
         else:
             raise ValueError(f"Language {language} not supported, try 'en' or 'nl' instead.")
 
-        # Load the data, shuffle it and put it into split DataLoaders.
         path_list = get_all_file_names(dataset_path)
         train_paths, test_paths = train_test_split(path_list, test_size=1-splits[0])
         dev_paths, test_paths = train_test_split(test_paths, test_size=splits[1]/(splits[1]+splits[2]))
 
-        if from_wiki is None:
-            from_wiki = "wiki" in dataset_path.lower()
         train_dataset = TS_Dataset2(files=train_paths, word2vec=word2vec, bert_tokenizer=bert_tokenizer, bert_model=bert_model, from_wiki=from_wiki)
         val_dataset = TS_Dataset2(files=dev_paths, word2vec=word2vec, bert_tokenizer=bert_tokenizer, bert_model=bert_model, from_wiki=from_wiki)
         test_dataset = TS_Dataset2(files=test_paths, word2vec=word2vec, bert_tokenizer=bert_tokenizer, bert_model=bert_model, from_wiki=from_wiki)
@@ -83,47 +79,17 @@ class TextSeg2:
         self.test_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=custom_collate, num_workers=num_workers)
         logger.info(f"Loaded {len(train_dataset)} training examples, {len(val_dataset)} validation examples, and {len(test_dataset)} test examples.")
 
-        self.load_from = load_from
-        self.current_epoch = 0
-
-    def run(self, epochs=10) -> Tuple[float, float]:
-        now = datetime.now().strftime(r'%m-%d_%H-%M')
-        checkpoint_path = os.path.join(CHECKPOINT_BASE, now)
-        os.makedirs(checkpoint_path, exist_ok=True)
-
+    # Override
+    def create_model(self):
         if self.load_from:
             model = torch.load(self.load_from).to(device)
-            logger.info(f"Loaded model from {self.load_from}.")
+            logger.info(f"Loaded TS_Model2 from {self.load_from}.")
         else:
-            model = create_model()
-            logger.info(f"Created new model.")
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+            model = create_model2()
+            logger.info(f"Created new TS_Model2.")
+        return model
 
-        best_val_scores = [np.inf, np.inf] # (pk, windowdiff)
-        with tqdm(desc='Epochs', total=epochs) as pbar:
-            for epoch in range(epochs):
-                self.current_epoch = epoch
-                self.train(model, optimizer)
-                torch.save(model, os.path.join(checkpoint_path, f'model_{epoch}.t7'))
-
-                val_pk, val_wd, threshold = self.validate(model)
-                if sum([val_pk, val_wd]) < sum(best_val_scores):
-                    test_scores = self.test(model, threshold)
-                    logger.result(f"Best model from Epoch {epoch} --- For threshold = {threshold:.4}, Pk = {test_scores[0]:.4}, windowdiff = {test_scores[1]:.4}")
-                    best_val_scores = [val_pk, val_wd]
-                    torch.save(model, os.path.join(checkpoint_path, f'model_best.t7'))
-                pbar.update(1)
-        return best_val_scores
-
-    def test_run(self, threshold=0.4):
-        if self.load_from:
-            model = torch.load(self.load_from).to(device)
-            logger.info(f"Loaded model from {self.load_from}.")
-        else:
-            model = create_model()
-            logger.info(f"Created new model.")
-        return self.test(model, threshold)
-
+    # Override
     def train(self, model, optimizer) -> None:
         model.train()
         total_loss = 0.0
@@ -154,6 +120,7 @@ class TextSeg2:
         logger.info(f"Training Epoch {self.current_epoch + 1} --- Loss = {avg_loss:.4}")
         writer.add_scalar('Loss/Train', avg_loss, self.current_epoch + 1)
 
+    # Override
     def validate(self, model) -> Tuple[float, float, float]:
         model.eval()
         # cm = np.zeros((2, 2), dtype=int)
@@ -186,6 +153,7 @@ class TextSeg2:
         logger.info(f"Validation Epoch {self.current_epoch + 1} --- For threshold = {best_threshold:.4}, Pk = {epoch_best[0]:.4}, windowdiff = {epoch_best[1]:.4}")
         return epoch_best[0], epoch_best[1], best_threshold
 
+    # Override
     def test(self, model, threshold: float) -> Tuple[float, float]:
         model.eval()
         scores = []
@@ -262,7 +230,6 @@ class TS_Dataset2(Dataset):
             try:
                 sentences = sent_tokenize(section)
                 sentence_labels = np.zeros(len(sentences), dtype=int)
-                sentence_labels[-1] = 1 # Last sentence ends a section --> 1.
                 for sentence in sentences:
                     sentence_words = self.word_tokenize(sentence)
                     if len(sentence_words) > 0:
@@ -270,7 +237,7 @@ class TS_Dataset2(Dataset):
                         data.append(sentence_representation)
                     else:
                         sentence_labels = sentence_labels[:-1]
-                        logging.warning(f"Sentence in {self.files[index]} is empty.")
+                sentence_labels[-1] = 1 # Last sentence ends a section --> 1.
                 labels += sentence_labels.tolist()
                 bert_sents.append(self.bert_embed(sentences))
             except ValueError:
@@ -278,7 +245,7 @@ class TS_Dataset2(Dataset):
             # if len(data) > 0:
                 # labels.append(len(data) - 1) # NOTE: this points towards the END of a segment.
 
-        return data, labels[:-1], torch.cat(bert_sents).to(device)
+        return data, labels[:-1], torch.cat(bert_sents)
 
     def __len__(self) -> int:
         """
@@ -302,7 +269,7 @@ class TS_Dataset2(Dataset):
             avg_pool = torch.nn.AvgPool2d(kernel_size=(output_layer.shape[1], 1)) # Take the average of the layer on the time (sequence) axis.
             bert_sents.append(avg_pool(output_layer).squeeze(dim=1).detach())
 
-        return torch.cat(bert_sents).to(device) # shape = (len(sentences), 768)
+        return torch.cat(bert_sents) # shape = (len(sentences), 768)
 
     def word_tokenize(self, sentence: str) -> List[str]:
         """

@@ -1,4 +1,4 @@
-import logging, os
+import logging, os, argparse
 from textseg_model import create_model
 import gensim.downloader as gensim_api
 from gensim.models import KeyedVectors
@@ -47,24 +47,43 @@ class TextSeg:
             device = torch.device("cpu")
             logger.info(f"Using device: {device}.")
         else:
+            if num_workers > 0:
+                torch.multiprocessing.set_start_method('spawn')
             logger.info(f"Using device: {torch.cuda.get_device_name(device)}.")
 
+        if from_wiki is None:
+            from_wiki = "wiki" in dataset_path.lower()
+        self.load_data(language, dataset_path, from_wiki, splits, batch_size, num_workers)
+        self.load_from = load_from
+        self.current_epoch = 0
+
+    def load_data(
+        self,
+        language: str,
+        dataset_path: str,
+        from_wiki: bool,
+        splits: List[float],
+        batch_size: int,
+        num_workers: int,
+        ) -> None:
+        """
+        Load the right pretrained models.
+        Shuffle and split the data, load it as TS_Datasets and put it into DataLoaders.
+        """
         if language == 'en':
-            word2vec = gensim_api.load('word2vec-google-news-300')
+            word2vec_path = gensim_api.load('word2vec-google-news-300', return_path=True)
+            word2vec = KeyedVectors.load_word2vec_format(word2vec_path, binary=True, limit=250_000)
         elif language == 'nl':
-            word2vec = KeyedVectors.load_word2vec_format(W2V_NL_PATH)
+            word2vec = KeyedVectors.load_word2vec_format(W2V_NL_PATH, limit=250_000)
         elif language == 'test':
             word2vec = None
         else:
             raise ValueError(f"Language {language} not supported, try 'en' or 'nl' instead.")
 
-        # Load the data, shuffle it and put it into split DataLoaders.
         path_list = get_all_file_names(dataset_path)
         train_paths, test_paths = train_test_split(path_list, test_size=1-splits[0])
         dev_paths, test_paths = train_test_split(test_paths, test_size=splits[1]/(splits[1]+splits[2]))
 
-        if from_wiki is None:
-            from_wiki = "wiki" in dataset_path.lower()
         train_dataset = TS_Dataset(train_paths, word2vec, from_wiki)
         val_dataset = TS_Dataset(dev_paths, word2vec, from_wiki)
         test_dataset = TS_Dataset(test_paths, word2vec, from_wiki)
@@ -74,20 +93,21 @@ class TextSeg:
         self.test_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=custom_collate, num_workers=num_workers)
         logger.info(f"Loaded {len(train_dataset)} training examples, {len(val_dataset)} validation examples, and {len(test_dataset)} test examples.")
 
-        self.load_from = load_from
-        self.current_epoch = 0
+    def create_model(self):
+        if self.load_from:
+            model = torch.load(self.load_from).to(device)
+            logger.info(f"Loaded TS_Model from {self.load_from}.")
+        else:
+            model = create_model()
+            logger.info(f"Created new TS_Model.")
+        return model
 
     def run(self, epochs=10) -> Tuple[float, float]:
         now = datetime.now().strftime(r'%m-%d_%H-%M')
         checkpoint_path = os.path.join(CHECKPOINT_BASE, now)
         os.makedirs(checkpoint_path, exist_ok=True)
 
-        if self.load_from:
-            model = torch.load(self.load_from).to(device)
-            logger.info(f"Loaded model from {self.load_from}.")
-        else:
-            model = create_model()
-            logger.info(f"Created new model.")
+        model = self.create_model()
         optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
         best_val_scores = [np.inf, np.inf] # (pk, windowdiff)
@@ -222,7 +242,7 @@ class TS_Dataset(Dataset):
     def __getitem__(self, index: int) -> Tuple[List, List[int]]:
         """
         For a document at index, returns:
-            data: List of n sentence representations (made out of word vectors).
+            data: List of n sentence embeddings (made out of word vectors).
             labels: List of n-1 labels [0 or 1]; a 1 signifies the END of a section (hence the last label is discarded).
         """
         with open(self.files[index], 'r') as f:
@@ -232,23 +252,25 @@ class TS_Dataset(Dataset):
         labels = []
 
         for i, section in enumerate(sections):
-            try:
-                sentences = sent_tokenize(section)
-                sentence_labels = np.zeros(len(sentences), dtype=int)
-                sentence_labels[-1] = 1 # Last sentence ends a section --> 1.
-                for sentence in sentences:
-                    sentence_words = self.word_tokenize(sentence)
-                    if len(sentence_words) > 0:
-                        sentence_representation = [self.model_word(word) for word in sentence_words]
-                        data.append(sentence_representation)
-                    else:
-                        sentence_labels = sentence_labels[:-1]
-                        logging.warning(f"Sentence in {self.files[index]} is empty.")
-                labels += sentence_labels.tolist()
-            except ValueError:
+            sentences = sent_tokenize(section)
+            if len(sentences) == 0:
                 logging.warning(f"Section {i + 1} in {self.files[index]} is empty.")
-            # if len(data) > 0:
-                # labels.append(len(data) - 1) # NOTE: this points towards the END of a segment.
+                continue
+
+            sentence_labels = np.zeros(len(sentences), dtype=int)
+            section_sent_emb = []
+            for sentence in sentences:
+                sentence_words = self.word_tokenize(sentence)
+                if len(sentence_words) > 0:
+                    sentence_emb = self.model_words(sentence_words)
+                    if len(sentence_emb) > 0:
+                        section_sent_emb.append(sentence_emb)
+            
+            if len(section_sent_emb) > 0:
+                data += section_sent_emb
+                sentence_labels = np.zeros(len(section_sent_emb), dtype=int)
+                sentence_labels[-1] = 1 # Last sentence ends a section --> 1.
+                labels += sentence_labels.tolist()
 
         return data, labels[:-1]
 
@@ -268,11 +290,43 @@ class TS_Dataset(Dataset):
                 sentence = sentence.replace(token, "")
         return regexp_tokenize(sentence, pattern=r'[\wÀ-ÖØ-öø-ÿ\-\']+')
 
-    def model_word(self, word):
-        if self.word2vec:
-            if word in self.word2vec:
-                return self.word2vec[word].reshape(1, 300)
+    def model_words(self, words: List[str]) -> List[np.ndarray]:
+        res = []
+        for word in words:
+            if self.word2vec:
+                if word in self.word2vec:
+                    res.append(self.word2vec[word].reshape(1, 300))
+                else:
+                    # return self.word2vec['UNK'].reshape(1, 300)
+                    continue # skip words not in the word2vec model
             else:
-                return self.word2vec['UNK'].reshape(1, 300)
-        else:
-            return rng.standard_normal(size=(1,300))
+                res.append(rng.standard_normal(size=(1, 300)))
+        return res
+
+def main(args):
+    ts = TextSeg(
+        language=args.lang,
+        dataset_path=args.data_dir,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        use_cuda= not args.disable_cuda,
+        load_from=args.load_from,
+    )
+    if args.test:
+        ts.test_run()
+    else:
+        res = ts.run(args.epochs)
+    print(res)
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Train/Test a Text Segmentation model.")
+    parser.add_argument("--test", action="store_true", help="Test mode.")
+    parser.add_argument("--lang", type=str, default="en", help="Language to use.")
+    parser.add_argument("--data_dir", type=str, help="Path to the dataset directory.")
+    parser.add_argument("--disable_cuda", action="store_true", help="Disable cuda (if available).")
+    parser.add_argument('--batch_size', help='Batch size', type=int, default=8)
+    parser.add_argument('--epochs', help='Number of epochs to run', type=int, default=10)
+    parser.add_argument('--load_from', help='Where to load an existing model from', type=str, default=None)
+    parser.add_argument('--num_workers', help='How many workers to use for data loading', type=int, default=0)
+
+    main(parser.parse_args())

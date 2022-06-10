@@ -75,12 +75,15 @@ def get_all_file_names(dir: str) -> List[str]:
     """
     Return a list of all files in a directory and its subdirectories.
     """
-    return [
+    res = [
         os.path.join(root, file) 
         for root, _, files in os.walk(dir) 
         for file in files 
         if os.path.isfile(os.path.join(root, file))
     ]
+    if len(res) == 0:
+        raise ValueError(f"No files found in {dir}")
+    return res
 
 def get_truth(clean_text: Union[str, List[str]]) -> List[int]:
     """

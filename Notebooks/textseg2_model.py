@@ -46,8 +46,6 @@ class TS_Model2(nn.Module):
     """
     Model for Text Segmentation.
     """
-    # criterion = nn.CrossEntropyLoss()
-
     def __init__(self, sentence_encoder: SentenceEncodingRNN2, hidden=128, num_layers=2):
         super().__init__()
         self.sentence_encoder = sentence_encoder
@@ -268,7 +266,7 @@ def supervised_cross_entropy(
     loss = alpha*loss_pred + (1-alpha)*loss_sims
     return loss
 
-def create_model(use_cuda=True) -> TS_Model2:
+def create_model2(use_cuda=True) -> TS_Model2:
     """Create a new TS_Model2 instance. Uses cuda if available, unless use_cuda=False."""
     if not use_cuda:
         global device

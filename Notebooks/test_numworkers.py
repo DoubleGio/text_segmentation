@@ -1,5 +1,6 @@
 """
 Script to test what the optimal amount of workers to use for textseg(2) DataLoaders are.
+0 is the only one that works 🙃
 """
 from time import time
 import os

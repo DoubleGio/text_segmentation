@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 import numpy as np
+from typing import Optional
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -77,12 +78,15 @@ class TS_Model(nn.Module):
         return padded.view(shape[2], 1, shape[3])  # (max_length, 1, 300)
 
     def forward(self, batch):
+        batch_size = len(batch)
         doc_lengths = [] # number of sentences in each document
         all_sentences = [] # list of all sentences for all documents
         for document in batch:
             doc_lengths.append(len(document))
             all_sentences += document
         doc_lengths = np.array(doc_lengths)
+        del batch
+        torch.cuda.empty_cache()
 
         # Sort the sentences on length from big to small
         sent_lengths = np.array([s.size()[0] for s in all_sentences]) # number of words in each sentence
@@ -121,7 +125,7 @@ class TS_Model(nn.Module):
         packed_docs = pack_padded_sequence(docs_tensor, ordered_doc_sizes)
 
         # Encode each document
-        sentence_lstm_output, _ = self.sentence_lstm(packed_docs, zero_state(self, batch_size=len(batch)))
+        sentence_lstm_output, _ = self.sentence_lstm(packed_docs, zero_state(self, batch_size=batch_size))
         padded_output, _ = pad_packed_sequence(sentence_lstm_output)  # (max sentence len, batch, 256)
 
         # Seperate the documents again, but this time remove the final predictions per document (-1),
@@ -141,10 +145,12 @@ def inverse_order(sort_order: np.ndarray) -> np.ndarray:
     inv[sort_order] = np.arange(sort_order.size)
     return inv
 
-def create_model(use_cuda=True) -> TS_Model:
+def create_model(use_cuda=True, set_device: Optional[torch.device] = None) -> TS_Model:
     """Create a new TS_Model instance. Uses cuda if available, unless use_cuda=False."""
-    if not use_cuda:
-        global device
+    global device
+    if set_device:
+        device = set_device
+    elif not use_cuda:
         device = torch.device("cpu")
     sentence_encoder = SentenceEncodingRNN(input_size=300, hidden=256, num_layers=2)
     return TS_Model(sentence_encoder, hidden=256, num_layers=2).to(device)

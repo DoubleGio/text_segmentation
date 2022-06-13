@@ -39,6 +39,7 @@ class TextSeg:
         num_workers = 0,
         use_cuda = True,
         load_from: Optional[str] = None,
+        subset: Optional[int] = None,
     ) -> None:
         """
         """
@@ -48,12 +49,15 @@ class TextSeg:
             logger.info(f"Using device: {device}.")
         else:
             if num_workers > 0:
-                torch.multiprocessing.set_start_method('spawn')
+                try:
+                    torch.multiprocessing.set_start_method('spawn')
+                except RuntimeError:
+                    pass
             logger.info(f"Using device: {torch.cuda.get_device_name(device)}.")
 
         if from_wiki is None:
             from_wiki = "wiki" in dataset_path.lower()
-        self.load_data(language, dataset_path, from_wiki, splits, batch_size, num_workers)
+        self.load_data(language, dataset_path, from_wiki, splits, batch_size, num_workers, subset)
         self.load_from = load_from
         self.current_epoch = 0
 
@@ -65,6 +69,7 @@ class TextSeg:
         splits: List[float],
         batch_size: int,
         num_workers: int,
+        subset: Optional[int] = None,
         ) -> None:
         """
         Load the right pretrained models.
@@ -72,7 +77,7 @@ class TextSeg:
         """
         if language == 'en':
             word2vec_path = gensim_api.load('word2vec-google-news-300', return_path=True)
-            word2vec = KeyedVectors.load_word2vec_format(word2vec_path, binary=True, limit=250_000)
+            word2vec = KeyedVectors.load_word2vec_format(word2vec_path, binary=True, limit=100_000)
         elif language == 'nl':
             word2vec = KeyedVectors.load_word2vec_format(W2V_NL_PATH, limit=250_000)
         elif language == 'test':
@@ -81,6 +86,8 @@ class TextSeg:
             raise ValueError(f"Language {language} not supported, try 'en' or 'nl' instead.")
 
         path_list = get_all_file_names(dataset_path)
+        if subset:
+            path_list = rng.choice(path_list, size=subset, replace=False).tolist()
         train_paths, test_paths = train_test_split(path_list, test_size=1-splits[0])
         dev_paths, test_paths = train_test_split(test_paths, test_size=splits[1]/(splits[1]+splits[2]))
 
@@ -98,7 +105,7 @@ class TextSeg:
             model = torch.load(self.load_from).to(device)
             logger.info(f"Loaded TS_Model from {self.load_from}.")
         else:
-            model = create_model()
+            model = create_model(set_device=device)
             logger.info(f"Created new TS_Model.")
         return model
 
@@ -250,11 +257,13 @@ class TS_Dataset(Dataset):
         sections = sectioned_clean_text(text)
         data = []
         labels = []
+        suitable_sections_count = 0
 
         for i, section in enumerate(sections):
             sentences = sent_tokenize(section)
-            if len(sentences) == 0:
-                logging.warning(f"Section {i + 1} in {self.files[index]} is empty.")
+            if not (80 > len(sentences) > 0): # Filter out empty or too long sections.
+                if len(sections) <= 2: # Skip docs that end up with just a single section
+                    break
                 continue
 
             sentence_labels = np.zeros(len(sentences), dtype=int)
@@ -271,7 +280,12 @@ class TS_Dataset(Dataset):
                 sentence_labels = np.zeros(len(section_sent_emb), dtype=int)
                 sentence_labels[-1] = 1 # Last sentence ends a section --> 1.
                 labels += sentence_labels.tolist()
+                suitable_sections_count += 1
 
+        # Get a random document if the current one is empty or has less than two suitable sections.
+        if len(data) == 0 or suitable_sections_count < 2:
+            logger.warning(f"SKIPPED Document {self.files[index]} - it's empty or has less than two suitable sections.")
+            return self.__getitem__(np.random.randint(0, len(self.files)))
         return data, labels[:-1]
 
     def __len__(self) -> int:
@@ -311,6 +325,7 @@ def main(args):
         num_workers=args.num_workers,
         use_cuda= not args.disable_cuda,
         load_from=args.load_from,
+        subset=args.subset,
     )
     if args.test:
         ts.test_run()
@@ -323,6 +338,7 @@ if __name__ == "__main__":
     parser.add_argument("--test", action="store_true", help="Test mode.")
     parser.add_argument("--lang", type=str, default="en", help="Language to use.")
     parser.add_argument("--data_dir", type=str, help="Path to the dataset directory.")
+    parser.add_argument("--subset", type=int, help="Use only a subset of the dataset.")
     parser.add_argument("--disable_cuda", action="store_true", help="Disable cuda (if available).")
     parser.add_argument('--batch_size', help='Batch size', type=int, default=8)
     parser.add_argument('--epochs', help='Number of epochs to run', type=int, default=10)

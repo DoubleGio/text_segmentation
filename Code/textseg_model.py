@@ -16,7 +16,7 @@ class SentenceEncodingRNN(nn.Module):
     """
     Model for sentence encoding.
     """
-    def __init__(self, input_size=300, hidden=256, num_layers=2):
+    def __init__(self, input_size:int, hidden=256, num_layers=2):
         super().__init__()
 
         self.num_layers = num_layers
@@ -69,12 +69,12 @@ class TS_Model(nn.Module):
         torch.cuda.empty_cache()
         return res
 
-def create_model(use_cuda=True, set_device: Optional[torch.device] = None) -> TS_Model:
+def create_model(input_size: int, use_cuda=True, set_device: Optional[torch.device] = None) -> TS_Model:
     """Create a new TS_Model instance. Uses cuda if available, unless use_cuda=False."""
     global device
     if set_device:
         device = set_device
     elif not use_cuda:
         device = torch.device("cpu")
-    sentence_encoder = SentenceEncodingRNN(input_size=300, hidden=256, num_layers=2)
+    sentence_encoder = SentenceEncodingRNN(input_size=input_size, hidden=256, num_layers=2)
     return TS_Model(sentence_encoder, hidden=256, num_layers=2).to(device)

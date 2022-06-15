@@ -17,8 +17,7 @@ import numpy as np
 rng = np.random.default_rng()
 from utils import ENWIKI_LOC, NLWIKI_LOC, NLNEWS_LOC, NLAUVI_LOC_C, NLAUVI_LOC_N, get_all_file_names, sectioned_clean_text, compute_metrics, LoggingHandler
 
-W2V_NL_PATH = '../Datasets/word2vec-nl-combined-160.tar.gz' # Taken from https://github.com/clips/dutchembeddings
-CHECKPOINT_BASE = 'checkpoints/textseg'
+W2V_NL_PATH = 'text_segmentation/Datasets/word2vec-nl-combined-160.txt' # Taken from https://github.com/clips/dutchembeddings
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -82,10 +81,13 @@ class TextSeg:
             word2vec = None
         else:
             raise ValueError(f"Language {language} not supported, try 'en' or 'nl' instead.")
+        self.dataset_name = dataset_path.split('/')[-2]
+        self.vec_size = word2vec.vector_size
 
         path_list = get_all_file_names(dataset_path)
         if subset:
-            path_list = rng.choice(path_list, size=subset, replace=False).tolist()
+            if subset < len(path_list):
+                path_list = rng.choice(path_list, size=subset, replace=False).tolist()
         # Split and shuffle the data
         train_paths, test_paths = train_test_split(path_list, test_size=1-splits[0])
         dev_paths, test_paths = train_test_split(test_paths, test_size=splits[1]/(splits[1]+splits[2]))
@@ -99,35 +101,62 @@ class TextSeg:
         self.test_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=custom_collate, num_workers=num_workers)
         logger.info(f"Loaded {len(train_dataset)} training examples, {len(val_dataset)} validation examples, and {len(test_dataset)} test examples.")
 
-    def get_model(self):
-        if self.load_from:
-            model = torch.load(self.load_from).to(device)
-            logger.info(f"Loaded TS_Model from {self.load_from}.")
+    def initialize_run(self, resume=False):
+        if resume:
+            if self.load_from is None:
+                raise ValueError("Can't resume without a load_from path.")
+            state = torch.load(self.load_from)
+            logger.info(f"Loaded state from {self.load_from}.")
+            now = state['now']
+            writer = SummaryWriter(log_dir=f'runs/textseg/{self.dataset_name}_{now}')
+            checkpoint_path = os.path.join(f'checkpoints/textseg/{self.dataset_name}_{now}')
+            
+            model = create_model(input_size=self.vec_size, set_device=device)
+            model.load_state_dict(state['state_dict'])
+            logger.info(f"Loaded model from {self.load_from}.")
+
+            optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+            optimizer.load_state_dict(state['optimizer'])
+
+            best_val_scores = state['best_val_scores']
+            non_improvement_count = state['non_improvement_count']
+            self.current_epoch = state['epoch']
         else:
-            model = create_model(set_device=device)
-            logger.info(f"Created new TS_Model.")
-        return model
+            now = datetime.now().strftime(r'%d-%m_%H-%M')
+            writer = SummaryWriter(log_dir=f'runs/textseg/{self.dataset_name}_{now}')
+            checkpoint_path = os.path.join(f'checkpoints/textseg/{self.dataset_name}_{now}')
+            os.makedirs(checkpoint_path, exist_ok=True)
 
-    def run(self, epochs=10) -> Tuple[float, float]:
-        writer = SummaryWriter()
-        now = datetime.now().strftime(r'%m-%d_%H-%M')
-        checkpoint_path = os.path.join(CHECKPOINT_BASE, now)
-        os.makedirs(checkpoint_path, exist_ok=True)
+            model = create_model(input_size=self.vec_size, set_device=device)
+            optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
-        model = self.get_model()
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+            best_val_scores = [np.inf, np.inf] # (pk, windowdiff)
+            non_improvement_count = 0
+        return now, writer, checkpoint_path, model, optimizer, best_val_scores, non_improvement_count
 
-        best_val_scores = [np.inf, np.inf] # (pk, windowdiff)
-        non_improvement_count = 0
+    def run(self, epochs=10, resume=False) -> Tuple[float, float]:
+        """
+        Start/Resume training.
+        """
+        now, writer, checkpoint_path, model, optimizer, best_val_scores, non_improvement_count = self.initialize_run(resume)
         with tqdm(desc='Epochs', total=epochs) as pbar:
-            for epoch in range(epochs):
-                if non_improvement_count > 5: # Stop early if no improvement for 5 epochs.
-                    logger.info("No improvement for 5 epochs, stopping early.")
+            for epoch in range(self.current_epoch, epochs):
+                if non_improvement_count > 4:
+                    logger.result("No improvement for 4 epochs, stopping early.")
                     break
 
                 self.current_epoch = epoch
                 self.train(model, optimizer, writer)
-                torch.save(model, os.path.join(checkpoint_path, f'model_{epoch}.t7'))
+                state = {
+                    'now': now,
+                    'epoch': epoch,
+                    'non_improvement_count': non_improvement_count,
+                    'state_dict': model.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'best_val_scores': best_val_scores,
+                }
+                torch.save(state, os.path.join(checkpoint_path, f'epoch_{epoch}'))
+                # torch.save(model, os.path.join(checkpoint_path, f'model_{epoch}.t7'))
                 val_pk, val_wd, threshold = self.validate(model, writer)
 
                 if sum([val_pk, val_wd]) < sum(best_val_scores):
@@ -135,21 +164,31 @@ class TextSeg:
                     test_scores = self.test(model, threshold, writer)
                     logger.result(f"Best model from Epoch {epoch} --- For threshold = {threshold:.4}, Pk = {test_scores[0]:.4}, windowdiff = {test_scores[1]:.4}")
                     best_val_scores = [val_pk, val_wd]
-                    torch.save(model, os.path.join(checkpoint_path, f'model_best.t7'))
+                    state = {
+                        'now': now,
+                        'epoch': epoch,
+                        'non_improvement_count': non_improvement_count,
+                        'state_dict': model.state_dict(),
+                        'optimizer': optimizer.state_dict(),
+                        'best_val_scores': best_val_scores,
+                        'threshold': threshold,
+                    }
+                    torch.save(state, os.path.join(checkpoint_path, f'best_model'))
+                    # torch.save(model, os.path.join(checkpoint_path, f'model_best.t7'))
                 else:
                     non_improvement_count += 1
                 pbar.update(1)
         writer.close()
         return best_val_scores
-
-    def test_run(self, threshold=0.4):
-        if self.load_from:
-            model = torch.load(self.load_from).to(device)
-            logger.info(f"Loaded model from {self.load_from}.")
-        else:
-            model = create_model()
-            logger.info(f"Created new model.")
-        return self.test(model, threshold)
+    
+    def run_test(self):
+        if self.load_from is None:
+            raise ValueError("Can't test without a load_from path.")
+        state = torch.load(self.load_from)
+        model = create_model(input_size=self.vec_size, set_device=device)
+        model.load_state_dict(state['state_dict'])
+        logger.info(f"Loaded model from {self.load_from}.")
+        return self.test(model, state['threshold'])
 
     def train(self, model, optimizer, writer) -> None:
         model.train()
@@ -159,6 +198,8 @@ class TextSeg:
                 sents = sents.to(device)
                 model.zero_grad()
                 output = model(sents)
+                del sents
+                torch.cuda.empty_cache()
                 output, targets = self.remove_last(output, targets)
 
                 target_var = torch.cat(targets, dim=0).to(device)
@@ -183,8 +224,10 @@ class TextSeg:
             for sents, targets in self.val_loader:
                 sents = sents.to(device)
                 output = model(sents)
+                del sents
+                torch.cuda.empty_cache()
                 output, targets = self.remove_last(output, targets)
-                
+
                 target_var = torch.cat(targets, dim=0).to(device)
                 loss = model.criterion(output, target_var)
                 total_loss += loss.item()
@@ -203,7 +246,7 @@ class TextSeg:
                 pbar.set_postfix(loss=loss.item())
                 pbar.update(len(targets))
 
-        val_loss = loss.item() / len(self.val_loader) # Average loss per batch.
+        val_loss = total_loss / len(self.val_loader) # Average loss per batch.
         best_scores = [np.inf, np.inf] # (pk, windowdiff) scores for the best threshold.
         best_threshold: float = None
         for threshold in thresholds:
@@ -217,13 +260,15 @@ class TextSeg:
         writer.add_scalar('wd_score/val', best_scores[1], self.current_epoch)
         return best_scores[0], best_scores[1], best_threshold
 
-    def test(self, model, threshold: float, writer) -> Tuple[float, float]:
+    def test(self, model, threshold: float, writer: Optional[SummaryWriter] = None) -> Tuple[float, float]:
         model.eval()
         scores = []
         with tqdm(desc='Testing', total=len(self.test_loader.dataset), leave=False) as pbar:
             for sents, targets in self.test_loader:
                 sents = sents.to(device)
                 output = model(sents)
+                del sents
+                torch.cuda.empty_cache()
                 output, targets = self.remove_last(output, targets)
 
                 output_softmax = F.softmax(output, dim=1)
@@ -238,9 +283,10 @@ class TextSeg:
                     doc_start_idx += len(doc_labels)
                 pbar.update(len(targets))
         epoch_pk, epoch_wd = np.mean(scores, axis=0) # (pk, windowdiff) average for this threshold, over all docs.
-        logger.info(f"Testing Epoch {self.current_epoch + 1} --- For threshold = {threshold:.4}, Pk = {epoch_pk:.4}, windowdiff = {epoch_wd:.4}")
-        writer.add_scalar('pk_score/test', epoch_pk, self.current_epoch)
-        writer.add_scalar('wd_score/test', epoch_wd, self.current_epoch)
+        if writer:
+            logger.info(f"Testing Epoch {self.current_epoch + 1} --- For threshold = {threshold:.4}, Pk = {epoch_pk:.4}, windowdiff = {epoch_wd:.4}")
+            writer.add_scalar('pk_score/test', epoch_pk, self.current_epoch)
+            writer.add_scalar('wd_score/test', epoch_wd, self.current_epoch)
         return epoch_pk, epoch_wd
 
     def remove_last(self, x: torch.Tensor, y: List[torch.Tensor]) -> Tuple[torch.Tensor, List[torch.Tensor]]:
@@ -359,7 +405,7 @@ class TS_Dataset(Dataset):
                     # return self.word2vec['UNK']
                     continue # skip words not in the word2vec model
             else:
-                res.append(rng.standard_normal(size=300))
+                res.append(rng.standard_normal(size=self.word2vec.vector_size))
                 
         return np.stack(res) if res else res
 
@@ -375,15 +421,17 @@ def main(args):
         subset=args.subset,
     )
     if args.test:
-        ts.test_run()
+        ts.run_test()
     else:
-        res = ts.run(args.epochs)
-    print(res)
+        res = ts.run(args.epochs, args.resume)
+    print(f'Best Pk = {res[0]} --- Best windowdiff = {res[1]}')
 
 if __name__ == "__main__":
     torch.multiprocessing.set_start_method('spawn')
     parser = argparse.ArgumentParser(description="Train/Test a Text Segmentation model.")
-    parser.add_argument("--test", action="store_true", help="Test mode.")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--test", action="store_true", help="Test mode.")
+    mode.add_argument("--resume", action="store_true", help="Resume training from a checkpoint.")
     parser.add_argument("--lang", type=str, default="en", help="Language to use.")
     parser.add_argument("--data_dir", type=str, help="Path to the dataset directory.")
     parser.add_argument("--subset", type=int, help="Use only a subset of the dataset.")

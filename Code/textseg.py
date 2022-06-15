@@ -7,6 +7,7 @@ from sklearn.metrics import confusion_matrix, f1_score, accuracy_score
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
+from torch.nn.utils.rnn import pack_sequence
 from torch.utils.tensorboard import SummaryWriter
 from typing import List, Optional, Tuple
 from tqdm import tqdm
@@ -19,7 +20,6 @@ from utils import ENWIKI_LOC, NLWIKI_LOC, NLNEWS_LOC, NLAUVI_LOC_C, NLAUVI_LOC_N
 W2V_NL_PATH = '../Datasets/word2vec-nl-combined-160.tar.gz' # Taken from https://github.com/clips/dutchembeddings
 CHECKPOINT_BASE = 'checkpoints/textseg'
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-writer = SummaryWriter()
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 logger.addHandler(LoggingHandler(use_tqdm=True))
@@ -43,16 +43,15 @@ class TextSeg:
     ) -> None:
         """
         """
+        if num_workers > 0:
+            if torch.multiprocessing.get_start_method() == 'fork':
+                logger.warning("Can't use num_workers > 0 with fork start method, setting num_workers to 0.")
+                num_workers = 0
         if not use_cuda:
             global device
             device = torch.device("cpu")
             logger.info(f"Using device: {device}.")
         else:
-            if num_workers > 0:
-                try:
-                    torch.multiprocessing.set_start_method('spawn')
-                except RuntimeError:
-                    pass
             logger.info(f"Using device: {torch.cuda.get_device_name(device)}.")
 
         if from_wiki is None:
@@ -72,14 +71,13 @@ class TextSeg:
         subset: Optional[int] = None,
         ) -> None:
         """
-        Load the right pretrained models.
-        Shuffle and split the data, load it as TS_Datasets and put it into DataLoaders.
+        Load the right data and pretrained models.
         """
         if language == 'en':
             word2vec_path = gensim_api.load('word2vec-google-news-300', return_path=True)
             word2vec = KeyedVectors.load_word2vec_format(word2vec_path, binary=True, limit=100_000)
         elif language == 'nl':
-            word2vec = KeyedVectors.load_word2vec_format(W2V_NL_PATH, limit=250_000)
+            word2vec = KeyedVectors.load_word2vec_format(W2V_NL_PATH, limit=100_000)
         elif language == 'test':
             word2vec = None
         else:
@@ -88,6 +86,7 @@ class TextSeg:
         path_list = get_all_file_names(dataset_path)
         if subset:
             path_list = rng.choice(path_list, size=subset, replace=False).tolist()
+        # Split and shuffle the data
         train_paths, test_paths = train_test_split(path_list, test_size=1-splits[0])
         dev_paths, test_paths = train_test_split(test_paths, test_size=splits[1]/(splits[1]+splits[2]))
 
@@ -100,7 +99,7 @@ class TextSeg:
         self.test_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=custom_collate, num_workers=num_workers)
         logger.info(f"Loaded {len(train_dataset)} training examples, {len(val_dataset)} validation examples, and {len(test_dataset)} test examples.")
 
-    def create_model(self):
+    def get_model(self):
         if self.load_from:
             model = torch.load(self.load_from).to(device)
             logger.info(f"Loaded TS_Model from {self.load_from}.")
@@ -110,27 +109,37 @@ class TextSeg:
         return model
 
     def run(self, epochs=10) -> Tuple[float, float]:
+        writer = SummaryWriter()
         now = datetime.now().strftime(r'%m-%d_%H-%M')
         checkpoint_path = os.path.join(CHECKPOINT_BASE, now)
         os.makedirs(checkpoint_path, exist_ok=True)
 
-        model = self.create_model()
+        model = self.get_model()
         optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
         best_val_scores = [np.inf, np.inf] # (pk, windowdiff)
+        non_improvement_count = 0
         with tqdm(desc='Epochs', total=epochs) as pbar:
             for epoch in range(epochs):
-                self.current_epoch = epoch
-                self.train(model, optimizer)
-                torch.save(model, os.path.join(checkpoint_path, f'model_{epoch}.t7'))
+                if non_improvement_count > 5: # Stop early if no improvement for 5 epochs.
+                    logger.info("No improvement for 5 epochs, stopping early.")
+                    break
 
-                val_pk, val_wd, threshold = self.validate(model)
+                self.current_epoch = epoch
+                self.train(model, optimizer, writer)
+                torch.save(model, os.path.join(checkpoint_path, f'model_{epoch}.t7'))
+                val_pk, val_wd, threshold = self.validate(model, writer)
+
                 if sum([val_pk, val_wd]) < sum(best_val_scores):
-                    test_scores = self.test(model, threshold)
+                    non_improvement_count = 0
+                    test_scores = self.test(model, threshold, writer)
                     logger.result(f"Best model from Epoch {epoch} --- For threshold = {threshold:.4}, Pk = {test_scores[0]:.4}, windowdiff = {test_scores[1]:.4}")
                     best_val_scores = [val_pk, val_wd]
                     torch.save(model, os.path.join(checkpoint_path, f'model_best.t7'))
+                else:
+                    non_improvement_count += 1
                 pbar.update(1)
+        writer.close()
         return best_val_scores
 
     def test_run(self, threshold=0.4):
@@ -142,95 +151,130 @@ class TextSeg:
             logger.info(f"Created new model.")
         return self.test(model, threshold)
 
-    def train(self, model, optimizer) -> None:
+    def train(self, model, optimizer, writer) -> None:
         model.train()
         total_loss = 0.0
-        with tqdm(desc='Training', total=len(self.train_loader)*self.train_loader.batch_size, leave=False) as pbar:
-            for data, labels in self.train_loader:
+        with tqdm(desc='Training', total=len(self.train_loader.dataset), leave=False) as pbar:
+            for sents, targets in self.train_loader:
+                sents = sents.to(device)
                 model.zero_grad()
-                output = model(data)
-                target_var = torch.cat(labels, dim=0).to(device)
+                output = model(sents)
+                output, targets = self.remove_last(output, targets)
+
+                target_var = torch.cat(targets, dim=0).to(device)
                 loss = model.criterion(output, target_var)
                 loss.backward()
                 optimizer.step()
                 total_loss += loss.item()
 
                 pbar.set_postfix(loss=loss.item())
-                pbar.update(len(data))
-        avg_loss = total_loss / len(self.train_loader) # Average loss per input.
-        logger.info(f"Training Epoch {self.current_epoch + 1} --- Loss = {avg_loss:.4}")
-        writer.add_scalar('Loss/Train', avg_loss, self.current_epoch + 1)
+                pbar.update(len(targets))
+        train_loss = total_loss / len(self.train_loader) # Average loss per batch.
+        logger.info(f"Training Epoch {self.current_epoch + 1} --- Loss = {train_loss:.4}")
+        writer.add_scalar('Loss/train', train_loss, self.current_epoch)
 
-    def validate(self, model) -> Tuple[float, float, float]:
+    def validate(self, model, writer) -> Tuple[float, float, float]:
         model.eval()
-        # cm = np.zeros((2, 2), dtype=int)
         thresholds = np.arange(0, 1, 0.05)
         scores = {k: [] for k in thresholds} # (pk, windowdiff) scores for each threshold.
+        total_loss = 0.0
 
-        with tqdm(desc="Validating", total=len(self.val_loader)*self.val_loader.batch_size, leave=False) as pbar:
-            for data, labels in self.val_loader:
-                output = model(data)
+        with tqdm(desc="Validating", total=len(self.val_loader.dataset), leave=False) as pbar:
+            for sents, targets in self.val_loader:
+                sents = sents.to(device)
+                output = model(sents)
+                output, targets = self.remove_last(output, targets)
+                
+                target_var = torch.cat(targets, dim=0).to(device)
+                loss = model.criterion(output, target_var)
+                total_loss += loss.item()
                 output_softmax = F.softmax(output, dim=1)
                 output_softmax = output_softmax.cpu().detach().numpy() # convert to numpy array.
 
                 # Calculate the Pk and windowdiff per document (in this batch) and append to scores for each threshold.
                 doc_start_idx = 0
-                for doc_labels in labels:
+                for doc_targets in targets:
                     for threshold in thresholds:
-                        doc_prediction = (output_softmax[doc_start_idx:doc_start_idx+len(doc_labels)][:, 1] > threshold).astype(int)
-                        pk, wd = compute_metrics(doc_prediction, doc_labels)
+                        doc_prediction = (output_softmax[doc_start_idx:doc_start_idx+len(doc_targets)][:, 1] > threshold).astype(int)
+                        pk, wd = compute_metrics(doc_prediction, doc_targets)
                         scores[threshold].append((pk, wd))
-                    doc_start_idx += len(doc_labels)
-                pbar.update(len(data))
-        # tn, fp, fn, tp = cm.ravel()
-        epoch_best = [np.inf, np.inf] # (pk, windowdiff)
+                    doc_start_idx += len(doc_targets)
+
+                pbar.set_postfix(loss=loss.item())
+                pbar.update(len(targets))
+
+        val_loss = loss.item() / len(self.val_loader) # Average loss per batch.
+        best_scores = [np.inf, np.inf] # (pk, windowdiff) scores for the best threshold.
         best_threshold: float = None
         for threshold in thresholds:
             avg_pk_wd = np.mean(scores[threshold], axis=0) # (pk, windowdiff) average for this threshold, over all docs.
-            if sum(avg_pk_wd) < sum(epoch_best):
-                epoch_best = avg_pk_wd
+            if sum(avg_pk_wd) < sum(best_scores):
+                best_scores = avg_pk_wd
                 best_threshold = threshold
-        logger.info(f"Validation Epoch {self.current_epoch + 1} --- For threshold = {best_threshold:.4}, Pk = {epoch_best[0]:.4}, windowdiff = {epoch_best[1]:.4}")
-        return epoch_best[0], epoch_best[1], best_threshold
+        logger.info(f"Validation Epoch {self.current_epoch + 1} --- Loss = {val_loss:.4}, For threshold = {best_threshold:.4}, Pk = {best_scores[0]:.4}, windowdiff = {best_scores[1]:.4}")
+        writer.add_scalar('Loss/val', val_loss, self.current_epoch)
+        writer.add_scalar('pk_score/val', best_scores[0], self.current_epoch)
+        writer.add_scalar('wd_score/val', best_scores[1], self.current_epoch)
+        return best_scores[0], best_scores[1], best_threshold
 
-    def test(self, model, threshold: float) -> Tuple[float, float]:
+    def test(self, model, threshold: float, writer) -> Tuple[float, float]:
         model.eval()
         scores = []
-        with tqdm(desc='Testing', total=len(self.test_loader)*self.test_loader.batch_size, leave=False) as pbar:
-            for data, labels in self.test_loader:
-                output = model(data)
+        with tqdm(desc='Testing', total=len(self.test_loader.dataset), leave=False) as pbar:
+            for sents, targets in self.test_loader:
+                sents = sents.to(device)
+                output = model(sents)
+                output, targets = self.remove_last(output, targets)
+
                 output_softmax = F.softmax(output, dim=1)
                 output_softmax = output_softmax.cpu().detach().numpy() # convert to numpy array.
 
                 # Calculate the Pk and windowdiff per document (in this batch) for the specified threshold.
                 doc_start_idx = 0
-                for doc_labels in labels:
+                for doc_labels in targets:
                     doc_prediction = (output_softmax[doc_start_idx:doc_start_idx+len(doc_labels)][:, 1] > threshold).astype(int)
                     pk, wd = compute_metrics(doc_prediction, doc_labels)
                     scores.append((pk, wd))
                     doc_start_idx += len(doc_labels)
-                pbar.update(len(data))
+                pbar.update(len(targets))
         epoch_pk, epoch_wd = np.mean(scores, axis=0) # (pk, windowdiff) average for this threshold, over all docs.
         logger.info(f"Testing Epoch {self.current_epoch + 1} --- For threshold = {threshold:.4}, Pk = {epoch_pk:.4}, windowdiff = {epoch_wd:.4}")
+        writer.add_scalar('pk_score/test', epoch_pk, self.current_epoch)
+        writer.add_scalar('wd_score/test', epoch_wd, self.current_epoch)
         return epoch_pk, epoch_wd
+
+    def remove_last(self, x: torch.Tensor, y: List[torch.Tensor]) -> Tuple[torch.Tensor, List[torch.Tensor]]:
+        """
+        For each document in the batch, remove the last sentence prediction/label (as it's unnecessary).
+        """
+        x_adj = []
+        y_adj = []
+        first_sent_i = 0
+        for target in y:
+            final_sent_i = first_sent_i + target.size(0)
+            x_adj.append(x[first_sent_i:final_sent_i-1, :])
+            y_adj.append(target[:-1])
+            first_sent_i = final_sent_i
+
+        return torch.cat(x_adj), y_adj
 
 
 def custom_collate(batch):
     """
     Prepare the batch for the model (so we can use data of varying lengths).
-    Follows original implementation.
     https://pytorch.org/docs/stable/data.html#dataloader-collate-fn
     """
-    b_data = []
-    b_targets = []
+    all_sents = []
+    batched_targets = []
     for data, targets in batch:
-        tensored_data = []
         for sentence in data:
-            tensored_data.append(torch.FloatTensor(np.concatenate(sentence)).to(device))
-        b_data.append(tensored_data)
-        tensored_targets = torch.LongTensor(targets).to(device)
-        b_targets.append(tensored_targets)
-    return b_data, b_targets
+            all_sents.append(torch.FloatTensor(sentence))
+        batched_targets.append(torch.LongTensor(targets))
+
+    # Pad and pack the sentences into a single tensor. 
+    # This function sorts it, but with enfore_sorted=False it gets unsorted again after passing it through a model.
+    packed_sents = pack_sequence(all_sents, enforce_sorted=False)
+    return packed_sents, batched_targets
 
 class TS_Dataset(Dataset):
     """
@@ -246,11 +290,12 @@ class TS_Dataset(Dataset):
         self.word2vec = word2vec
         self.from_wiki = from_wiki
 
-    def __getitem__(self, index: int) -> Tuple[List, List[int]]:
+    def __getitem__(self, index: int) -> Tuple[List[np.ndarray], List[int]]:
         """
         For a document at index, returns:
             data: List of n sentence embeddings (made out of word vectors).
-            labels: List of n-1 labels [0 or 1]; a 1 signifies the END of a section (hence the last label is discarded).
+            labels: List of n labels [0 or 1]; 
+                    A 1 signifies the END of a section (hence the last sentence/label is discarded later).
         """
         with open(self.files[index], 'r') as f:
             text = f.read()
@@ -271,7 +316,7 @@ class TS_Dataset(Dataset):
             for sentence in sentences:
                 sentence_words = self.word_tokenize(sentence)
                 if len(sentence_words) > 0:
-                    sentence_emb = self.model_words(sentence_words)
+                    sentence_emb = self.embed_words(sentence_words)
                     if len(sentence_emb) > 0:
                         section_sent_emb.append(sentence_emb)
             
@@ -286,7 +331,7 @@ class TS_Dataset(Dataset):
         if len(data) == 0 or suitable_sections_count < 2:
             logger.warning(f"SKIPPED Document {self.files[index]} - it's empty or has less than two suitable sections.")
             return self.__getitem__(np.random.randint(0, len(self.files)))
-        return data, labels[:-1]
+        return data, labels
 
     def __len__(self) -> int:
         """
@@ -304,18 +349,20 @@ class TS_Dataset(Dataset):
                 sentence = sentence.replace(token, "")
         return regexp_tokenize(sentence, pattern=r'[\wÀ-ÖØ-öø-ÿ\-\']+')
 
-    def model_words(self, words: List[str]) -> List[np.ndarray]:
+    def embed_words(self, words: List[str]) -> np.ndarray:
         res = []
         for word in words:
             if self.word2vec:
                 if word in self.word2vec:
-                    res.append(self.word2vec[word].reshape(1, 300))
+                    res.append(self.word2vec[word])
                 else:
-                    # return self.word2vec['UNK'].reshape(1, 300)
+                    # return self.word2vec['UNK']
                     continue # skip words not in the word2vec model
             else:
-                res.append(rng.standard_normal(size=(1, 300)))
-        return res
+                res.append(rng.standard_normal(size=300))
+                
+        return np.stack(res) if res else res
+
 
 def main(args):
     ts = TextSeg(
@@ -334,6 +381,7 @@ def main(args):
     print(res)
 
 if __name__ == "__main__":
+    torch.multiprocessing.set_start_method('spawn')
     parser = argparse.ArgumentParser(description="Train/Test a Text Segmentation model.")
     parser.add_argument("--test", action="store_true", help="Test mode.")
     parser.add_argument("--lang", type=str, default="en", help="Language to use.")

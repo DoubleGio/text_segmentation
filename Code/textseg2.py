@@ -80,7 +80,7 @@ class TextSeg2(TextSeg):
         logger.info(f"Loaded {len(train_dataset)} training examples, {len(val_dataset)} validation examples, and {len(test_dataset)} test examples.")
 
     # Override
-    def create_model(self):
+    def get_model(self):
         if self.load_from:
             model = torch.load(self.load_from).to(device)
             logger.info(f"Loaded TS_Model2 from {self.load_from}.")

@@ -1,18 +1,17 @@
-from typing import Tuple, List, Union
+from typing import Optional, Tuple, List, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence, PackedSequence
 import numpy as np
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
 
 class SentenceEncodingRNN2(nn.Module):
     """
     Model for sentence encoding.
     """
-    def __init__(self, input_size=300, hidden=256, num_layers=2):
+    def __init__(self, input_size:int, hidden=256, num_layers=2):
         super().__init__()
 
         self.num_layers = num_layers
@@ -49,7 +48,8 @@ class TS_Model2(nn.Module):
     def __init__(self, sentence_encoder: SentenceEncodingRNN2, hidden=128, num_layers=2):
         super().__init__()
         self.sentence_encoder = sentence_encoder
-        self.sentence_lstm = nn.LSTM(input_size=768+2*hidden, # The dimension of BERT embedding + output of BiLSTM hidden state
+        # input size = hidden * 2 + 768
+        self.sentence_lstm = nn.LSTM(input_size=sentence_encoder.hidden * 2 + 768, # Output of BiLSTM hidden state + the dimension of BERT embedding.
                                      hidden_size=hidden,
                                      num_layers=num_layers,
                                      batch_first=True,
@@ -134,9 +134,21 @@ class TS_Model2(nn.Module):
 
     def forward(
         self,
+        sentences: PackedSequence,
+        bert_sents: torch.TensorType
+    ) -> torch.TensorType:
+        """
+        Forward pass of the model.
+        """
+        encoded_sentences = self.sentence_encoder(sentences)
+        cat_encodings = torch.cat((encoded_sentences, bert_sents), 1)
+        
+
+    def forward_old(
+        self,
         batch: List[List[torch.TensorType]],
         bert_sents: List[torch.TensorType]
-        ) -> Union[torch.TensorType, Tuple[torch.TensorType, torch.TensorType]]:
+    ) -> Union[torch.TensorType, Tuple[torch.TensorType, torch.TensorType]]:
         """
         Forward pass of the model.
         Return:
@@ -266,10 +278,12 @@ def supervised_cross_entropy(
     loss = alpha*loss_pred + (1-alpha)*loss_sims
     return loss
 
-def create_model2(use_cuda=True) -> TS_Model2:
+def create_model2(input_size: int, use_cuda=True, set_device: Optional[torch.device] = None) -> TS_Model2:
     """Create a new TS_Model2 instance. Uses cuda if available, unless use_cuda=False."""
-    if not use_cuda:
-        global device
+    global device
+    if set_device:
+        device = set_device
+    elif not use_cuda:
         device = torch.device("cpu")
-    sentence_encoder = SentenceEncodingRNN2(input_size=300, hidden=256, num_layers=2)
+    sentence_encoder = SentenceEncodingRNN2(input_size=input_size, hidden=256, num_layers=2)
     return TS_Model2(sentence_encoder, hidden=256, num_layers=2).to(device)

@@ -7,11 +7,6 @@ from typing import Optional, List
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-def zero_state(module, batch_size):
-    # * 2 is for the two directions
-    return torch.zeros(module.num_layers * 2, batch_size, module.hidden).to(device), torch.zeros(module.num_layers * 2, batch_size, module.hidden).to(device)
-
-
 class SentenceEncodingRNN(nn.Module):
     """
     Model for sentence encoding.
@@ -68,6 +63,11 @@ class TS_Model(nn.Module):
         del encoded_sentences, encoded_docs
         torch.cuda.empty_cache()
         return res
+
+
+def zero_state(module, batch_size):
+    # * 2 is for the two directions
+    return torch.zeros(module.num_layers * 2, batch_size, module.hidden).to(device), torch.zeros(module.num_layers * 2, batch_size, module.hidden).to(device)
 
 def create_model(input_size: int, use_cuda=True, set_device: Optional[torch.device] = None) -> TS_Model:
     """Create a new TS_Model instance. Uses cuda if available, unless use_cuda=False."""

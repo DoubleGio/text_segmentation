@@ -2,7 +2,7 @@ import re, os, shutil, logging
 from functools import partial, partialmethod
 from tqdm import tqdm
 from typing import List, Optional, Union, Tuple, Iterable
-from nltk.tokenize import sent_tokenize
+from nltk.tokenize import sent_tokenize, regexp_tokenize
 from nltk.metrics.segmentation import pk, windowdiff
 
 ENWIKI_LOC = '../Datasets/ENWiki/data'
@@ -12,27 +12,36 @@ NLAUVI_LOC_C = '../Datasets/NLAuVi/data_concat'
 NLAUVI_LOC_N = '../Datasets/NLAuVi/data_normal'
 SECTION_MARK = '==='
 
-def clean_text(text: str, mark_sections=False) -> str:
+def clean_text(text: str, mark_sections=False, from_wiki=False) -> str:
     """
     Removes wiki-header and footer.
     Removes headers (= lines starting with SECTION_MARK) from string.
     If mark_sections=True, add SECTION_MARK to mark section beginnings.
     """
-    t = re.sub(r'^(?:(<doc)|(\n<\/doc)).*\n+', '', text, flags=re.MULTILINE)
+    if from_wiki:
+        text = re.sub(r'^(?:(<doc)|(\n<\/doc)).*\n+', '', text, flags=re.MULTILINE)
+        for token in ["***LIST***", "***formula***", "***codice***"]:
+            text = text.replace(token, "")
     if mark_sections:
-        t = re.sub(r'^=+.*\n+', SECTION_MARK, t, flags=re.MULTILINE)
+        text = re.sub(r'^=+.*\n+', SECTION_MARK, text, flags=re.MULTILINE)
     else:
-        t = re.sub(r'^=+.*\n+', '', t, flags=re.MULTILINE)
-    return t
+        text = re.sub(r'^=+.*\n+', '', text, flags=re.MULTILINE)
+    return text
 
-def sectioned_clean_text(text: str) -> List[str]:
+def sectioned_clean_text(text: str, from_wiki=False) -> List[str]:
     """
     Removes wiki-header and footer.
     Split text into sections (without header marks).
     """
-    t = re.sub(r'^(?:(<doc)|(\n<\/doc)).*\n+', '', text, flags=re.MULTILINE)
+    t = clean_text(text, mark_sections=False, from_wiki=from_wiki)
     split = re.split(r'^=+.*\n+', t, flags=re.MULTILINE)
     return list(filter(None, split))
+
+def word_tokenize(sentence: str) -> List[str]:
+        """
+        sentence: String to tokenize.
+        """
+        return regexp_tokenize(sentence, pattern=r'[\wÀ-ÖØ-öø-ÿ\-\']+')
 
 def compute_metrics(predictions: Iterable[int], ground_truth: Iterable[int], k: Optional[int] = None, quiet=True) -> Tuple[float, float]:
     """

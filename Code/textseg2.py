@@ -1,13 +1,13 @@
 import logging, os
+from datetime import datetime
 from textseg2_model import create_model2, supervised_cross_entropy
-from textseg import TextSeg
-import gensim.downloader as gensim_api
+from textseg import TextSeg, TS_Dataset
 from gensim.models import KeyedVectors
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import confusion_matrix, f1_score, accuracy_score
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
+from torch.nn.utils.rnn import pack_sequence
 from torch.utils.tensorboard import SummaryWriter
 from typing import List, Optional, Tuple, Union
 from tqdm import tqdm
@@ -16,7 +16,7 @@ import numpy as np
 from transformers import logging as tlogging
 from transformers import BertTokenizer, BertModel
 rng = np.random.default_rng()
-from utils import ENWIKI_LOC, NLWIKI_LOC, NLNEWS_LOC, NLAUVI_LOC_C, NLAUVI_LOC_N, get_all_file_names, sectioned_clean_text, compute_metrics, LoggingHandler
+from utils import get_all_file_names, sectioned_clean_text, compute_metrics, LoggingHandler, clean_text, word_tokenize
 
 W2V_NL_PATH = '../Datasets/word2vec-nl-combined-160.tar.gz' # Taken from https://github.com/clips/dutchembeddings
 CHECKPOINT_BASE = 'checkpoints/textseg2'
@@ -34,45 +34,49 @@ class TextSeg2(TextSeg):
     Extended with the enhancements from https://github.com/lxing532/improve_topic_seg.
     """
 
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-
+    def __init__(self, bert_name: Optional[str] = None, **kwargs) -> None:
+        # TODO: precalculate embeddings
+        language = kwargs.get('language')
+        if bert_name:
+            self.bert_tokenizer = BertTokenizer.from_pretrained(bert_name)
+            self.bert_model = BertModel.from_pretrained(bert_name)
+        elif language:
+            if language == 'en' or language == 'test':
+                self.bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+                self.bert_model = BertModel.from_pretrained('bert-base-uncased')
+            elif language == 'nl':
+                self.bert_tokenizer = BertTokenizer.from_pretrained('GroNLP/bert-base-dutch-cased')
+                self.bert_model = BertModel.from_pretrained('GroNLP/bert-base-dutch-cased')
+            else:
+                raise ValueError(f"Language {language} not supported.")
+        logger.info(f"Loaded BERT model: '{self.bert_model.name_or_path}'.")
+        super().__init__(**kwargs)
+        
     # Override
     def load_data(
         self,
-        language: str,
         dataset_path: str,
         from_wiki: bool,
         splits: List[float],
         batch_size: int,
         num_workers: int,
-        ) -> None:
+        subset: Optional[int] = None,
+    ) -> None:
         """
         Load the right pretrained models.
         Shuffle and split the data, load it as TS_Datasets and put it into DataLoaders.
         """
-        if language == 'en':
-            word2vec = gensim_api.load('word2vec-google-news-300')
-            bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-            bert_model = BertModel.from_pretrained('bert-base-uncased')
-        elif language == 'nl':
-            word2vec = KeyedVectors.load_word2vec_format(W2V_NL_PATH)
-            bert_tokenizer = BertTokenizer.from_pretrained('GroNLP/bert-base-dutch-cased')
-            bert_model = BertModel.from_pretrained('GroNLP/bert-base-dutch-cased')
-        elif language == 'test':
-            word2vec = None
-            bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-            bert_model = BertModel.from_pretrained('bert-base-uncased')
-        else:
-            raise ValueError(f"Language {language} not supported, try 'en' or 'nl' instead.")
-
+        self.dataset_name = dataset_path.split('/')[-2]
         path_list = get_all_file_names(dataset_path)
+        if subset:
+            if subset < len(path_list):
+                path_list = rng.choice(path_list, size=subset, replace=False).tolist()
         train_paths, test_paths = train_test_split(path_list, test_size=1-splits[0])
         dev_paths, test_paths = train_test_split(test_paths, test_size=splits[1]/(splits[1]+splits[2]))
 
-        train_dataset = TS_Dataset2(files=train_paths, word2vec=word2vec, bert_tokenizer=bert_tokenizer, bert_model=bert_model, from_wiki=from_wiki)
-        val_dataset = TS_Dataset2(files=dev_paths, word2vec=word2vec, bert_tokenizer=bert_tokenizer, bert_model=bert_model, from_wiki=from_wiki)
-        test_dataset = TS_Dataset2(files=test_paths, word2vec=word2vec, bert_tokenizer=bert_tokenizer, bert_model=bert_model, from_wiki=from_wiki)
+        train_dataset = TS_Dataset2(texts=train_paths, word2vec=self.word2vec, bert_tokenizer=self.bert_tokenizer, bert_model=self.bert_model, from_wiki=from_wiki)
+        val_dataset = TS_Dataset2(texts=dev_paths, word2vec=self.word2vec, bert_tokenizer=self.bert_tokenizer, bert_model=self.bert_model, from_wiki=from_wiki)
+        test_dataset = TS_Dataset2(texts=test_paths, word2vec=self.word2vec, bert_tokenizer=self.bert_tokenizer, bert_model=self.bert_model, from_wiki=from_wiki)
 
         self.train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=custom_collate, num_workers=num_workers)
         self.val_loader = DataLoader(val_dataset, batch_size=batch_size, collate_fn=custom_collate, num_workers=num_workers)
@@ -80,23 +84,52 @@ class TextSeg2(TextSeg):
         logger.info(f"Loaded {len(train_dataset)} training examples, {len(val_dataset)} validation examples, and {len(test_dataset)} test examples.")
 
     # Override
-    def get_model(self):
-        if self.load_from:
-            model = torch.load(self.load_from).to(device)
-            logger.info(f"Loaded TS_Model2 from {self.load_from}.")
+    def initialize_run(self, resume=False):
+        if resume:
+            if self.load_from is None:
+                raise ValueError("Can't resume without a load_from path.")
+            state = torch.load(self.load_from)
+            logger.info(f"Loaded state from {self.load_from}.")
+            now = state['now']
+            writer = SummaryWriter(log_dir=f'runs/textseg2/{self.dataset_name}_{now}')
+            checkpoint_path = os.path.join(f'checkpoints/textseg2/{self.dataset_name}_{now}')
+            
+            model = create_model2(input_size=self.vec_size, set_device=device)
+            model.load_state_dict(state['state_dict'])
+            logger.info(f"Loaded model from {self.load_from}.")
+
+            optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+            optimizer.load_state_dict(state['optimizer'])
+
+            best_val_scores = state['best_val_scores']
+            non_improvement_count = state['non_improvement_count']
+            self.current_epoch = state['epoch']
         else:
-            model = create_model2()
-            logger.info(f"Created new TS_Model2.")
-        return model
+            now = datetime.now().strftime(r'%b%d_%H%M')
+            writer = SummaryWriter(log_dir=f'runs/textseg2/{self.dataset_name}_{now}')
+            checkpoint_path = os.path.join(f'checkpoints/textseg2/{self.dataset_name}_{now}')
+            os.makedirs(checkpoint_path, exist_ok=True)
+
+            model = create_model2(input_size=self.vec_size, set_device=device)
+            optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+
+            best_val_scores = [np.inf, np.inf] # (pk, windowdiff)
+            non_improvement_count = 0
+        return now, writer, checkpoint_path, model, optimizer, best_val_scores, non_improvement_count
+
 
     # Override
-    def train(self, model, optimizer) -> None:
+    def train(self, model, optimizer, writer) -> None:
         model.train()
         total_loss = 0.0
-        with tqdm(desc='Training', total=len(self.train_loader)*self.train_loader.batch_size, leave=False) as pbar:
+        with tqdm(desc=f'Training #{self.current_epoch}', total=len(self.train_loader.dataset), leave=False) as pbar:
             for data, labels, bert_sents in self.train_loader:
+                data, bert_sents = data.to(device), bert_sents.to(device)
                 model.zero_grad()
                 output, sim_scores = model(data, bert_sents)
+                del data, bert_sents
+                torch.cuda.empty_cache()
+                #TODO:
                 target_var = torch.cat(labels, dim=0).to(device)
 
                 # Generate the ground truth for coherence scores...
@@ -116,9 +149,9 @@ class TextSeg2(TextSeg):
 
                 pbar.set_postfix(loss=loss.item())
                 pbar.update(len(data))
-        avg_loss = total_loss / len(self.train_loader) # Average loss per input.
-        logger.info(f"Training Epoch {self.current_epoch + 1} --- Loss = {avg_loss:.4}")
-        writer.add_scalar('Loss/Train', avg_loss, self.current_epoch + 1)
+        train_loss = total_loss / len(self.train_loader) # Average loss per batch.
+        logger.info(f"Training Epoch {self.current_epoch + 1} --- Loss = {train_loss:.4}")
+        writer.add_scalar('Loss/train', train_loss, self.current_epoch + 1)
 
     # Override
     def validate(self, model) -> Tuple[float, float, float]:
@@ -182,25 +215,128 @@ def custom_collate(batch):
     Follows original implementation.
     https://pytorch.org/docs/stable/data.html#dataloader-collate-fn
     """
-    b_data = []
-    b_targets = []
-    b_bert_sents = []
-    for data, targets, bert_sents in batch:
-        tensored_data = []
+    all_sents = []
+    batched_targets = []
+    batched_bert = []
+    for data, targets, bert in batch:
         for sentence in data:
-            tensored_data.append(torch.FloatTensor(np.concatenate(sentence)).to(device))
-        b_data.append(tensored_data)
-        tensored_targets = torch.LongTensor(targets).to(device)
-        b_targets.append(tensored_targets)
-        b_bert_sents.append(bert_sents)
-    return b_data, b_targets, b_bert_sents
+            all_sents.append(torch.FloatTensor(sentence))
+        if type(targets[0]) == int: # If targets is a list, then it are the ground truths.
+            batched_targets.append(torch.LongTensor(targets))
+        else:                       # Else it is the raw text.
+            batched_targets.append(targets)
+        batched_bert.append(bert)
+        
+    # Pad and pack the sentences into a single tensor. 
+    # This function sorts it, but with enfore_sorted=False it gets unsorted again after passing it through a model.
+    packed_sents = pack_sequence(all_sents, enforce_sorted=False)
+    return packed_sents, batched_targets, torch.cat(batched_bert)
 
-class TS_Dataset2(Dataset):
+
+    # b_data = []
+    # b_targets = []
+    # b_bert_sents = []
+    # for data, targets, bert_sents in batch:
+    #     tensored_data = []
+    #     for sentence in data:
+    #         tensored_data.append(torch.FloatTensor(np.concatenate(sentence)).to(device))
+    #     b_data.append(tensored_data)
+    #     tensored_targets = torch.LongTensor(targets).to(device)
+    #     b_targets.append(tensored_targets)
+    #     b_bert_sents.append(bert_sents)
+    # return b_data, b_targets, b_bert_sents
+
+class TS_Dataset2(TS_Dataset):
+    def __init__(
+        self,
+        bert_tokenizer: BertTokenizer,
+        bert_model: BertModel,
+        *args, **kwargs
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.bert_tokenizer = bert_tokenizer
+        self.bert_model = bert_model
+    
+    # Override
+    def __getitem__(self, index: int) -> Tuple[List[np.ndarray], Union[List[int], List[str]], torch.FloatTensor]:
+        """
+        For a document at index, returns:
+            data: List of n sentence embeddings (made out of word vectors).
+            labels: List of n labels [0 or 1]; 
+                    A 1 signifies the END of a section (hence the last sentence/label is discarded later).
+        """
+        text = self.get_text(index)
+        data = []
+        labels = []
+        raw_text = []
+        
+        sections = sectioned_clean_text(text, from_wiki=self.from_wiki)
+        suitable_sections_count = 0
+        for section in sections:
+            sentences = sent_tokenize(section)
+            if not (80 > len(sentences) > 0): # Filter out empty or too long sections.
+                if len(sections) <= 2: # Skip docs that end up with just a single section
+                    break
+                continue
+            
+            section_sent_emb = []
+            for sentence in sentences:
+                sentence_words = word_tokenize(sentence)
+                if len(sentence_words) > 0:
+                    sentence_emb = self.embed_words(sentence)
+                    if len(sentence_emb) > 0:
+                        section_sent_emb.append(sentence_emb)
+                        raw_text.append(sentence)
+                    
+            if len(section_sent_emb) > 0:
+                data += section_sent_emb
+                sentence_labels = np.zeros(len(section_sent_emb), dtype=int)
+                sentence_labels[-1] = 1 # Last sentence ends a section --> 1.
+                labels += sentence_labels.tolist()
+                suitable_sections_count += 1
+            
+        bert_data = self.bert_embed(raw_text)
+        # Get a random document if the current one is empty or has less than two suitable sections.
+        if len(data) == 0 or suitable_sections_count < 2:
+            doc_id = self.texts[index] if self.are_paths else index
+            logger.warning(f"SKIPPED Document {doc_id} - it's empty or has less than two suitable sections.")
+            return self.__getitem__(np.random.randint(0, len(self.texts)))
+
+        return data, labels, bert_data if self.labeled else data, raw_text, bert_data
+
+
+    def bert_embed(self, sentences: Union[str, List[str]], batch_size=4) -> torch.FloatTensor:
+        """
+        Returns the BERT embedding(s) of a sentence/list of sentences.
+        This follows the same procedure as the bert-as-service module (which was originally used).
+        """
+        if isinstance(sentences, str):
+            sentences = [sentences]
+        bert_sents = []
+        for i in range(0, len(sentences), batch_size):
+            batch = sentences[i:min(i+batch_size, len(sentences))]
+            tokenized = self.bert_tokenizer(batch, padding=True, return_tensors='pt') # Pad to max seq length in batch.
+            # Hidden layers have a shape of (batch_size, max_seq_len, 768) - only the second-to-last layer is used.
+            output_layer = self.bert_model(**tokenized, output_hidden_states=True).hidden_states[-2]
+            avg_pool = torch.nn.AvgPool2d(kernel_size=(output_layer.shape[1], 1)) # Take the average of the layer on the time (sequence) axis.
+            bert_sents.append(avg_pool(output_layer).squeeze(dim=1).detach())
+
+        return torch.cat(bert_sents) # shape = (len(sentences), 768)
+
+
+class TS_Dataset22(Dataset):
     """
     Custom Text Segmentation Dataset class for use in Dataloaders.
     Includes BERT sentence embeddings. TODO: Precalculate embeddings?
     """
-    def __init__(self, files: List[str], word2vec: KeyedVectors, bert_tokenizer: BertTokenizer, bert_model: BertModel, from_wiki=False) -> None:
+    def __init__(
+        self,files: List[str],
+        word2vec: KeyedVectors,
+        bert_tokenizer: BertTokenizer,
+        bert_model: BertModel,
+        from_wiki=False,
+        labeled=True
+        ) -> None:
         """
         files: List of strings pointing towards files to read.
         word2vec: KeyedVectors object containing the word2vec model.
@@ -211,6 +347,7 @@ class TS_Dataset2(Dataset):
         self.from_wiki = from_wiki
         self.bert_tokenizer = bert_tokenizer
         self.bert_model = bert_model
+        self.labeled = labeled
 
     def __getitem__(self, index: int) -> Tuple[List, List[int], torch.FloatTensor]:
         """

@@ -33,8 +33,11 @@ def sectioned_clean_text(text: str, from_wiki=False) -> List[str]:
     Removes wiki-header and footer.
     Split text into sections (without header marks).
     """
-    t = clean_text(text, mark_sections=False, from_wiki=from_wiki)
-    split = re.split(r'^=+.*\n+', t, flags=re.MULTILINE)
+    if from_wiki:
+        text = re.sub(r'^(?:(<doc)|(\n<\/doc)).*\n+', '', text, flags=re.MULTILINE)
+        for token in ["***LIST***", "***formula***", "***codice***"]:
+            text = text.replace(token, "")
+    split = re.split(r'^=+.*\n+', text, flags=re.MULTILINE)
     return list(filter(None, split))
 
 def word_tokenize(sentence: str) -> List[str]:

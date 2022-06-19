@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence, PackedSequence, pack_sequence
+from torch.nn.utils.rnn import pad_packed_sequence, PackedSequence
 import numpy as np
 from typing import Optional, List
 
@@ -28,7 +28,7 @@ class SentenceEncodingRNN(nn.Module):
         packed_output, _ = self.lstm(x, zero_state(self, batch_size))
         padded_output, lengths = pad_packed_sequence(packed_output) # (max sentence len, batch, 256) 
 
-        maxes = torch.zeros(batch_size, padded_output.size(2)).to(device)
+        maxes = torch.zeros(batch_size, padded_output.size(2), device=device)
         for i in range(batch_size):
             maxes[i, :] = torch.max(padded_output[:lengths[i], i, :], 0)[0]
 
@@ -58,16 +58,16 @@ class TS_Model(nn.Module):
 
     def forward(self, sentences: PackedSequence) -> torch.Tensor:
         encoded_sentences = self.sentence_encoder(sentences)
-        encoded_docs, _ = self.sentence_lstm(encoded_sentences)
-        res = self.h2s(encoded_docs)
-        del encoded_sentences, encoded_docs
-        torch.cuda.empty_cache()
+        encoded_sentences, _ = self.sentence_lstm(encoded_sentences)
+        res = self.h2s(encoded_sentences)
+        # del encoded_sentences, _
+        # torch.cuda.empty_cache()
         return res
 
 
 def zero_state(module, batch_size):
     # * 2 is for the two directions
-    return torch.zeros(module.num_layers * 2, batch_size, module.hidden).to(device), torch.zeros(module.num_layers * 2, batch_size, module.hidden).to(device)
+    return torch.zeros(module.num_layers * 2, batch_size, module.hidden, device=device), torch.zeros(module.num_layers * 2, batch_size, module.hidden, device=device)
 
 def create_model(input_size: int, use_cuda=True, set_device: Optional[torch.device] = None) -> TS_Model:
     """Create a new TS_Model instance. Uses cuda if available, unless use_cuda=False."""

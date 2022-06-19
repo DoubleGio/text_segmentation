@@ -2,7 +2,7 @@ from typing import Optional, Tuple, List, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence, PackedSequence
+from torch.nn.utils.rnn import pack_sequence, pack_padded_sequence, pad_packed_sequence, PackedSequence
 import numpy as np
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -28,8 +28,7 @@ class SentenceEncodingRNN2(nn.Module):
 
     def forward(self, x):
         batch_size = x.batch_sizes[0]
-        s = zero_state(self, batch_size)
-        packed_output, _ = self.lstm(x, s)
+        packed_output, _ = self.lstm(x, zero_state(self, batch_size))
         padded_output, lengths = pad_packed_sequence(packed_output) # (max sentence len, batch, 256) 
 
         # attention
@@ -130,18 +129,56 @@ class TS_Model2(nn.Module):
 
             output = attn_weight.matmul(Z[win_size,:,0:int(Z.size()[-1]/2)])
 
-        return output
+        return output.squeeze(0)
 
     def forward(
         self,
         sentences: PackedSequence,
-        bert_sents: torch.TensorType
+        bert_sents: torch.TensorType,
+        doc_lengths: List[int],
     ) -> torch.TensorType:
         """
         Forward pass of the model.
         """
         encoded_sentences = self.sentence_encoder(sentences)
-        cat_encodings = torch.cat((encoded_sentences, bert_sents), 1)
+        encoded_sentences = torch.cat((encoded_sentences, bert_sents), 1) # Add the BERT embeddings to the newly made ones.
+        encoded_sentences, _ = self.sentence_lstm(encoded_sentences) # Sentence hidden states.
+
+        # Sentence-Level Restricted Self-Attention
+        # TODO: Implement a batched version of this.
+        win_size = 3
+        doc_outputs = []
+        sim_scores = []
+        doc_start_index = 0
+        for doc_len in doc_lengths:
+            doc_out = encoded_sentences[doc_start_index:doc_start_index+doc_len, :]
+            doc_context_embedding = []
+            for i in range(doc_len):
+                doc_context_embedding.append(
+                    self.compute_sentences_similarity(
+                        doc_out[
+                            max(0, i - win_size):min(i + win_size + 1, doc_len)
+                        ], i, win_size
+                    )
+                )
+            # Compute the consecutive sentence pairs' similarities.
+            if self.training: # May be skipped since it is not used outside of loss calculation.
+                sim_scores.append(self.compute_sentence_pair_coherence(doc_out, pair_size=1))
+    
+            # context_embeddings.append(torch.stack(doc_context_embedding))
+            doc_outputs.append(torch.cat([doc_out, torch.stack(doc_context_embedding)], -1))
+            doc_start_index += doc_len
+
+        packed_docs = pack_sequence(doc_outputs, enforce_sorted=False)
+        del doc_outputs
+        torch.cuda.empty_cache()
+        encoded_sentences, _ = self.sentence_lstm_2(packed_docs) # Final sentence hidden states.
+
+        if self.training:
+            return self.h2s(encoded_sentences), torch.cat(sim_scores, 0).unsqueeze(1)
+        else:
+            return self.h2s(encoded_sentences)
+              
         
 
     def forward_old(

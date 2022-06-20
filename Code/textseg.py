@@ -1,4 +1,4 @@
-import logging, os, argparse
+import logging, os, argparse, gc
 from textseg_model import create_model
 import gensim.downloader as gensim_api
 from gensim.models import KeyedVectors
@@ -6,15 +6,15 @@ from sklearn.model_selection import train_test_split
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
-from torch.nn.utils.rnn import pack_sequence
+from torch.nn.utils.rnn import pack_sequence, pad_sequence
 from torch.utils.tensorboard import SummaryWriter
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Tuple
 from tqdm import tqdm
 from nltk import sent_tokenize
 from datetime import datetime
 import numpy as np
 rng = np.random.default_rng()
-from utils import get_all_file_names, sectioned_clean_text, compute_metrics, LoggingHandler, word_tokenize
+from utils import get_all_file_names, clean_text, sectioned_clean_text, compute_metrics, LoggingHandler, word_tokenize
 
 W2V_NL_PATH = 'text_segmentation/Datasets/word2vec-nl-combined-160.txt' # Taken from https://github.com/clips/dutchembeddings
 EARLY_STOP = 4
@@ -83,9 +83,10 @@ class TextSeg:
             self.use_cuda = False if device_name == 'cpu' else True
 
         if dataset_path:
+            self.subsets = [int(subset * split) for split in splits] if subset else None
             if from_wiki is None:
                 from_wiki = "wiki" in dataset_path.lower()
-            self.load_data(dataset_path, from_wiki, splits, batch_size, num_workers, subset)
+            self.load_data(dataset_path, from_wiki, splits, batch_size, num_workers)
         self.load_from = load_from
         self.current_epoch = 0
 
@@ -96,28 +97,27 @@ class TextSeg:
         splits: List[float],
         batch_size: int,
         num_workers: int,
-        subset: Optional[int] = None,
     ) -> None:
         """
         Load the right data and pretrained models.
         """
         self.dataset_name = dataset_path.split('/')[-2]
         path_list = get_all_file_names(dataset_path)
-        if subset:
-            if subset < len(path_list):
-                path_list = rng.choice(path_list, size=subset, replace=False).tolist()
+
         # Split and shuffle the data
         train_paths, test_paths = train_test_split(path_list, test_size=1-splits[0])
         dev_paths, test_paths = train_test_split(test_paths, test_size=splits[1]/(splits[1]+splits[2]))
 
-        train_dataset = TS_Dataset(train_paths, from_wiki)
-        val_dataset = TS_Dataset(dev_paths, from_wiki)
-        test_dataset = TS_Dataset(test_paths, from_wiki)
+        train_dataset = TS_Dataset(np.array(train_paths), from_wiki)
+        val_dataset = TS_Dataset(np.array(dev_paths), from_wiki)
+        test_dataset = TS_Dataset(np.array(test_paths), from_wiki)
 
         self.train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=custom_collate, num_workers=num_workers, pin_memory=self.use_cuda)
         self.val_loader = DataLoader(val_dataset, batch_size=batch_size, collate_fn=custom_collate, num_workers=num_workers, pin_memory=self.use_cuda)
         self.test_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=custom_collate, num_workers=num_workers, pin_memory=self.use_cuda)
         logger.info(f"Loaded {len(train_dataset)} training examples, {len(val_dataset)} validation examples, and {len(test_dataset)} test examples.")
+        if self.subsets:
+            logger.info(f"Subsets: train {self.subsets[0]}, validation {self.subsets[1]}, test {self.subsets[2]}")
 
     def initialize_run(self, resume=False):
         if resume:
@@ -194,6 +194,7 @@ class TextSeg:
                 else:
                     non_improvement_count += 1
                 pbar.update(1)
+                gc.collect()
             logger.info(f"Total time elapsed: {pbar.format_dict['elapsed']}")
         writer.close()
         return best_val_scores
@@ -222,18 +223,23 @@ class TextSeg:
             threshold = state['threshold']
         logger.info(f"Using threshold {threshold:.2}.")
 
-        text_data = TS_Dataset(texts, from_wiki, labeled=False)
-        text_loader = DataLoader(text_data, batch_size=4, shuffle=False, collate_fn=custom_collate, num_workers=0, pin_memory=self.use_cuda)
+        text_data = TS_Dataset(np.array(texts), from_wiki, labeled=False)
+        text_loader = DataLoader(text_data, batch_size=4, collate_fn=custom_collate, num_workers=0, pin_memory=self.use_cuda)
+        logger.info(f"Loaded {len(text_data)} texts.")
 
         segmented_texts = []
         with tqdm(desc='Segmenting', total=len(text_loader.dataset)) as pbar:
             with torch.no_grad():
-                for sents, texts in text_loader:
+                for sents, texts, doc_lengths in text_loader:
+                    if sents is None:
+                        pbar.update(text_loader.batch_size)
+                        continue
+
                     if self.use_cuda:
                         sents = sents.to(device, non_blocking=True)
+                        doc_lengths = doc_lengths.to(device, non_blocking=True)
                     output = model(sents)
-                    # del sents
-                    # torch.cuda.empty_cache()
+                    del sents
                     output_softmax = F.softmax(output, dim=1)
                     output_softmax = output_softmax.cpu().detach().numpy()
 
@@ -248,31 +254,33 @@ class TextSeg:
                                 segmented_text += '\n======\n'
                         segmented_texts.append(segmented_text)
                         pbar.update(len(texts))
+                    torch.cuda.empty_cache()
 
         return segmented_texts
 
     def train(self, model, optimizer, writer) -> None:
         model.train()
         total_loss = torch.tensor(0.0, device=device)
-        with tqdm(desc=f'Training #{self.current_epoch}', total=len(self.train_loader.dataset), leave=False) as pbar:
-            for sents, targets in self.train_loader:
+        with tqdm(desc=f'Training #{self.current_epoch}', total=min(len(self.train_loader.dataset), self.subsets[0]), leave=False) as pbar:
+            for sents, targets, doc_lengths in self.train_loader:
+                if pbar.n > self.subsets[0]:
+                    break
                 if self.use_cuda:
                     sents = sents.to(device, non_blocking=True)
+                    targets = targets.to(device, non_blocking=True)
+                    doc_lengths = doc_lengths.to(device, non_blocking=True)
                 model.zero_grad()
                 output = model(sents)
-                # del sents
-                # torch.cuda.empty_cache()
-                output, targets = self.remove_last(output, targets)
+                del sents
+                output, targets, doc_lengths = self.remove_last(output, targets, doc_lengths)
 
-                target_var = torch.cat(targets, dim=0)
-                if self.use_cuda:
-                    target_var = target_var.to(device, non_blocking=True)
-                loss = model.criterion(output, target_var)
+                loss = model.criterion(output, targets)
                 loss.backward()
                 optimizer.step()
-                total_loss += loss
+                total_loss += loss.detach()
 
-                pbar.update(len(targets))
+                pbar.update(len(doc_lengths))
+                torch.cuda.empty_cache()
 
         train_loss = total_loss.item() / len(self.train_loader) # Average loss per batch.
         logger.info(f"Training Epoch {self.current_epoch + 1} --- Loss = {train_loss:.4}")
@@ -284,34 +292,35 @@ class TextSeg:
         scores = {k: [] for k in thresholds} # (pk, windowdiff) scores for each threshold.
         total_loss = torch.tensor(0.0, device=device)
 
-        with tqdm(desc=f"Validating #{self.current_epoch}", total=len(self.val_loader.dataset), leave=False) as pbar:
+        with tqdm(desc=f"Validating #{self.current_epoch}", total=min(len(self.val_loader.dataset), self.subsets[1]), leave=False) as pbar:
             with torch.no_grad():
-                for sents, targets in self.val_loader:
+                for sents, targets, doc_lengths in self.val_loader:
+                    if pbar.n > self.subsets[1]:
+                        break
                     if self.use_cuda:
                         sents = sents.to(device, non_blocking=True)
+                        targets = targets.to(device, non_blocking=True)
+                        doc_lengths = doc_lengths.to(device, non_blocking=True)
                     output = model(sents)
-                    # del sents
-                    # torch.cuda.empty_cache()
-                    output, targets = self.remove_last(output, targets)
+                    del sents
+                    output, targets, doc_lengths = self.remove_last(output, targets, doc_lengths)
 
-                    target_var = torch.cat(targets, dim=0)
-                    if self.use_cuda:
-                        target_var = target_var.to(device, non_blocking=True)
-                    loss = model.criterion(output, target_var)
-                    total_loss += loss
+                    loss = model.criterion(output, targets)
+                    total_loss += loss.detach()
                     output_softmax = F.softmax(output, dim=1)
                     output_softmax = output_softmax.cpu().detach().numpy() # convert to numpy array.
 
                     # Calculate the Pk and windowdiff per document (in this batch) and append to scores for each threshold.
                     doc_start_idx = 0
-                    for doc_targets in targets:
+                    for doc_len in doc_lengths:
                         for threshold in thresholds:
-                            doc_prediction = (output_softmax[doc_start_idx:doc_start_idx+len(doc_targets)][:, 1] > threshold).astype(int)
-                            pk, wd = compute_metrics(doc_prediction, doc_targets)
+                            doc_prediction = (output_softmax[doc_start_idx:doc_start_idx+doc_len][:, 1] > threshold).astype(int)
+                            # doc_prediction = (output_softmax[doc_start_idx:doc_start_idx+len(doc_targets)][:, 1] > threshold).astype(int)
+                            pk, wd = compute_metrics(doc_prediction, targets[doc_start_idx:doc_start_idx+doc_len])
                             scores[threshold].append((pk, wd))
-                        doc_start_idx += len(doc_targets)
-
+                        doc_start_idx += doc_len
                     pbar.update(len(targets))
+                    torch.cuda.empty_cache()
 
         val_loss = total_loss.item() / len(self.val_loader) # Average loss per batch.
         best_scores = [np.inf, np.inf] # (pk, windowdiff) scores for the best threshold.
@@ -330,27 +339,32 @@ class TextSeg:
     def test(self, model, threshold: float, writer: Optional[SummaryWriter] = None) -> Tuple[float, float]:
         model.eval()
         scores = []
-        with tqdm(desc=f'Testing #{self.current_epoch}', total=len(self.test_loader.dataset), leave=False) as pbar:
+        with tqdm(desc=f'Testing #{self.current_epoch}', total=min(len(self.test_loader.dataset), self.subsets[2]), leave=False) as pbar:
             with torch.no_grad():
-                for sents, targets in self.test_loader:
+                for sents, targets, doc_lengths in self.test_loader:
+                    if pbar.n > self.subsets[2]:
+                        break
                     if self.use_cuda:
                         sents = sents.to(device, non_blocking=True)
+                        targets = targets.to(device, non_blocking=True)
+                        doc_lengths = doc_lengths.to(device, non_blocking=True)
                     output = model(sents)
-                    # del sents
-                    # torch.cuda.empty_cache()
-                    output, targets = self.remove_last(output, targets)
+                    del sents
+                    output, targets, doc_lengths = self.remove_last(output, targets, doc_lengths)
 
                     output_softmax = F.softmax(output, dim=1)
                     output_softmax = output_softmax.cpu().detach().numpy() # convert to numpy array.
 
                     # Calculate the Pk and windowdiff per document (in this batch) for the specified threshold.
                     doc_start_idx = 0
-                    for doc_labels in targets:
-                        doc_prediction = (output_softmax[doc_start_idx:doc_start_idx+len(doc_labels)][:, 1] > threshold).astype(int)
-                        pk, wd = compute_metrics(doc_prediction, doc_labels)
+                    for doc_len in doc_lengths:
+                        doc_prediction = (output_softmax[doc_start_idx:doc_start_idx+doc_len][:, 1] > threshold).astype(int)
+                        # doc_prediction = (output_softmax[doc_start_idx:doc_start_idx+len(doc_labels)][:, 1] > threshold).astype(int)
+                        pk, wd = compute_metrics(doc_prediction, targets[doc_start_idx:doc_start_idx+doc_len])
                         scores.append((pk, wd))
-                        doc_start_idx += len(doc_labels)
+                        doc_start_idx += doc_len
                     pbar.update(len(targets))
+                    torch.cuda.empty_cache()
 
         epoch_pk, epoch_wd = np.mean(scores, axis=0) # (pk, windowdiff) average for this threshold, over all docs.
         if writer:
@@ -359,23 +373,41 @@ class TextSeg:
             writer.add_scalar('wd_score/test', epoch_wd, self.current_epoch)
         return epoch_pk, epoch_wd
 
-    def remove_last(self, x: torch.Tensor, y: List[torch.Tensor]) -> Tuple[torch.Tensor, List[torch.Tensor]]:
+    def remove_last(self, x: torch.Tensor, y: torch.LongTensor, lengths: torch.LongTensor) -> Tuple[torch.Tensor, torch.LongTensor, torch.LongTensor]:
         """
         For each document in the batch, remove the last sentence prediction/label (as it's unnecessary).
         """
-        x_adj = []
-        y_adj = []
+        x_adj = torch.tensor([], device=device)
+        y_adj = torch.tensor([], dtype=torch.int, device=device)
         first_sent_i = 0
-        for target in y:
-            final_sent_i = first_sent_i + target.size(0)
-            x_adj.append(x[first_sent_i:final_sent_i-1, :])
-            y_adj.append(target[:-1])
+        for i in range(lengths.size(0)):
+            final_sent_i = first_sent_i + lengths[i]
+            x_adj = torch.cat((x_adj, x[first_sent_i:final_sent_i-1, :]), dim=0)
+            y_adj = torch.cat((y_adj, y[first_sent_i:final_sent_i-1]), dim=0)
             first_sent_i = final_sent_i
-
-        return torch.cat(x_adj), y_adj
+            lengths[i] -= 1
+        
+        return x_adj, y_adj, lengths
 
 
 def custom_collate(batch):
+    all_sents = []
+    batched_targets = np.array([])
+    doc_lengths = torch.LongTensor([])
+    for data, targets in batch:
+        if data is not None:
+            for i in range(data.shape[0]):
+                all_sents.append(data[i][data[i].sum(dim=1) != 0]) # remove padding
+            doc_lengths = torch.cat((doc_lengths, torch.LongTensor([len(targets)])))
+            batched_targets = np.concatenate((batched_targets, targets))
+    if len(all_sents) == 0:
+        return None, None, None
+    packed_sents = pack_sequence(all_sents, enforce_sorted=False)
+    if batched_targets.dtype == float:
+        batched_targets = torch.from_numpy(batched_targets).long()
+    return packed_sents, batched_targets, doc_lengths
+
+def custom_collate_old(batch):
     """
     Prepare the batch for the model (so we can use data of varying lengths).
     https://pytorch.org/docs/stable/data.html#dataloader-collate-fn
@@ -383,13 +415,12 @@ def custom_collate(batch):
     all_sents = []
     batched_targets = []
     for data, targets in batch:
-        for sentence in data:
-            all_sents.append(torch.FloatTensor(sentence))
-        if type(targets[0]) == int: # If targets is a list, then it are the ground truths.
+        all_sents += data
+        if targets.dtype == int: # If targets is a list of ints, then it are the ground truths.
             batched_targets.append(torch.LongTensor(targets))
         else:                       # Else it is the raw text.
             batched_targets.append(targets)
-
+    del batch
     # Pad and pack the sentences into a single tensor. 
     # This function sorts it, but with enfore_sorted=False it gets unsorted again after passing it through a model.
     packed_sents = pack_sequence(all_sents, enforce_sorted=False)
@@ -400,12 +431,12 @@ class TS_Dataset(Dataset):
     Custom Text Segmentation Dataset class for use in Dataloaders.
     word2vec: KeyedVectors object containing the word2vec model (set by TextSeg class).
     """
-    MAX_SECTION_LEN = 80 # Maximum number of sentences in a section.
+    MAX_SECTION_LEN = 70 # Maximum number of sentences in a section.
     word2vec: Optional[KeyedVectors] = None
 
     def __init__(
         self,
-        texts: List[str],
+        texts: np.ndarray,
         from_wiki=False,
         labeled=True
     ) -> None:
@@ -422,51 +453,82 @@ class TS_Dataset(Dataset):
         self.from_wiki = from_wiki
         self.labeled = labeled
 
-    def __getitem__(self, index: int) -> Tuple[List[np.ndarray], Union[List[int], List[str]]]:
+    def __getitem__(self, index: int) -> Tuple[torch.FloatTensor, np.ndarray]:
         """
         For a document at index, returns:
             data: List of n sentence embeddings (made out of word vectors).
-            labels: List of n labels [0 or 1]; 
-                    A 1 signifies the END of a section (hence the last sentence/label is discarded later).
+
+            targets: List of n target labels [0 or 1]; a 1 signifies the END of a section (hence the last sentence/label is discarded later).
+             OR
+            raw_text: List containing the text of the sentences of the document.
         """
+        if self.labeled:
+            return self.get_data_targets(index)
+        else:
+            return self.get_data_raw(index)
+
+    def get_data_targets(self, index: int) -> Tuple[torch.FloatTensor, np.ndarray]:
+        """Get the data and targets for a document at index."""
         text = self.get_text(index)
         data = []
-        labels = []
-        raw_text = []
-        
+        targets = np.array([], dtype=int)
+
         sections = sectioned_clean_text(text, from_wiki=self.from_wiki)
         suitable_sections_count = 0
         for section in sections:
             sentences = sent_tokenize(section)
-            if not (TS_Dataset.MAX_SECTION_LEN > len(sentences) > 0): # Filter out empty or too long sections.
+            if not (TS_Dataset.MAX_SECTION_LEN > len(sentences) > 1): # Filter too short or too long sections.
                 if len(sections) <= 2: # Skip docs that end up with just a single section
                     break
                 continue
             
-            section_sent_emb = []
+            section_len = 0
             for sentence in sentences:
                 sentence_words = word_tokenize(sentence)
                 if len(sentence_words) > 0:
-                    sentence_emb = self.embed_words(sentence)
+                    sentence_emb = self.embed_words(sentence_words)
                     if len(sentence_emb) > 0:
-                        section_sent_emb.append(sentence_emb)
-                        raw_text.append(sentence)
+                        section_len += 1
+                        data.append(sentence_emb)
                     
-            if len(section_sent_emb) > 0:
-                data += section_sent_emb
-                sentence_labels = np.zeros(len(section_sent_emb), dtype=int)
+            if section_len > 0:
+                sentence_labels = np.zeros(section_len, dtype=int)
                 sentence_labels[-1] = 1 # Last sentence ends a section --> 1.
-                labels += sentence_labels.tolist()
+                targets = np.append(targets, sentence_labels)
                 suitable_sections_count += 1
 
         # Get a random document if the current one is empty or has less than two suitable sections.
         if len(data) == 0 or suitable_sections_count < 2:
-            doc_id = self.texts[index] if self.are_paths else index
-            logger.warning(f"SKIPPED Document {doc_id} - it's empty or has less than two suitable sections.")
-            return self.__getitem__(np.random.randint(0, len(self.texts)))
+            doc_id = self.texts[index].split('/', 2)[-1] if self.are_paths else index
+            logger.warning(f"SKIPPED Document {doc_id} - empty/unsuitable.")
+            return self.__getitem__(rng.integers(0, len(self.texts)))
 
-        return (data, labels) if self.labeled else (data, raw_text)
+        data = pad_sequence(data, batch_first=True) # (num_sents, max_sent_len, embed_dim)
+        return data, targets
 
+    def get_data_raw(self, index: int) -> Tuple[torch.FloatTensor, np.ndarray]:
+        """Get the data and raw text for a document at index."""
+        text = self.get_text(index)
+        data = []
+        raw_text = np.array([])
+
+        text = clean_text(text, from_wiki=self.from_wiki)
+        sentences = sent_tokenize(text)
+        for sentence in sentences:
+            sentence_words = word_tokenize(sentence)
+            if len(sentence_words) > 0:
+                sentence_emb = self.embed_words(sentence_words)
+                if len(sentence_emb) > 0:
+                    data.append(sentence_emb)
+                    raw_text = np.append(raw_text, sentence)
+
+        if len(data) == 0:
+            doc_id = self.texts[index].split('/', 2)[-1] if self.are_paths else index
+            logger.warning(f"SKIPPED Document {doc_id} - it's empty.")
+            return None, None
+        data = pad_sequence(data, batch_first=True) # (num_sents, max_sent_len, embed_dim)
+        return data, raw_text
+        
     def __len__(self) -> int:
         return len(self.texts)
 
@@ -478,7 +540,7 @@ class TS_Dataset(Dataset):
             text = self.texts[index]
         return text
 
-    def embed_words(self, words: List[str]) -> np.ndarray:
+    def embed_words(self, words: List[str]) -> torch.FloatTensor:
         res = []
         for word in words:
             if TS_Dataset.word2vec:
@@ -490,7 +552,7 @@ class TS_Dataset(Dataset):
             else:
                 # logger.warning("No word2vec model loaded.")
                 res.append(rng.standard_normal(size=300))
-        return np.stack(res) if res else res
+        return torch.FloatTensor(np.stack(res)) if res else []
 
 
 def main(args):
@@ -518,9 +580,9 @@ if __name__ == "__main__":
     parser.add_argument("--data_dir", type=str, help="Path to the dataset directory.")
     parser.add_argument("--subset", type=int, help="Use only a subset of the dataset.")
     parser.add_argument("--disable_cuda", action="store_true", help="Disable cuda (if available).")
-    parser.add_argument('--batch_size', help='Batch size', type=int, default=8)
+    parser.add_argument('--batch_size', help='Batch size', type=int, default=2)
     parser.add_argument('--epochs', help='Number of epochs to run', type=int, default=10)
     parser.add_argument('--load_from', help='Where to load an existing model from', type=str, default=None)
-    parser.add_argument('--num_workers', help='How many workers to use for data loading', type=int, default=0)
+    parser.add_argument('--num_workers', help='How many workers to use for data loading', type=int, default=16)
 
     main(parser.parse_args())

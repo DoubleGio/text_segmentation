@@ -44,7 +44,7 @@ def word_tokenize(sentence: str) -> List[str]:
         """
         sentence: String to tokenize.
         """
-        return regexp_tokenize(sentence, pattern=r'[\wÀ-ÖØ-öø-ÿ\-\']+')
+        return regexp_tokenize(sentence.lower(), pattern=r'[\wÀ-ÖØ-öø-ÿ\-\']+')
 
 def compute_metrics(predictions: Iterable[int], ground_truth: Iterable[int], k: Optional[int] = None, quiet=True) -> Tuple[float, float]:
     """

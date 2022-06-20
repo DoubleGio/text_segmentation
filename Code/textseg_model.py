@@ -26,11 +26,11 @@ class SentenceEncodingRNN(nn.Module):
     def forward(self, x):
         batch_size = x.batch_sizes[0]
         packed_output, _ = self.lstm(x, zero_state(self, batch_size))
-        padded_output, lengths = pad_packed_sequence(packed_output) # (max sentence len, batch, 256) 
+        padded_output, lengths = pad_packed_sequence(packed_output, batch_first=True) # (batch, max_sentence_length, hidden * 2) 
 
         maxes = torch.zeros(batch_size, padded_output.size(2), device=device)
         for i in range(batch_size):
-            maxes[i, :] = torch.max(padded_output[:lengths[i], i, :], 0)[0]
+            maxes[i, :] = torch.max(padded_output[i, :lengths[i], :], 0)[0]
 
         return maxes
 
@@ -47,7 +47,6 @@ class TS_Model(nn.Module):
         self.sentence_lstm = nn.LSTM(input_size=sentence_encoder.hidden * 2,
                                      hidden_size=hidden,
                                      num_layers=num_layers,
-                                     batch_first=True,
                                      dropout=0,
                                      bidirectional=True)
 

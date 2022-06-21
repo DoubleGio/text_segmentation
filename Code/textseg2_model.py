@@ -29,10 +29,9 @@ class SentenceEncodingRNN2(nn.Module):
     def forward(self, x):
         batch_size = x.batch_sizes[0]
         packed_output, _ = self.lstm(x, zero_state(self, batch_size))
-        padded_output, lengths = pad_packed_sequence(packed_output) # (max sentence len, batch, 256) 
+        padded_output, lengths = pad_packed_sequence(packed_output, batch_first=True) # (batch, max sentence len, hidden * 2) 
 
         # attention
-        padded_output = padded_output.permute(1, 0, 2)
         word_annotation = self.mlp(padded_output)
         attn_weight = word_annotation.matmul(self.context_vector)
         attended_outputs = torch.stack([F.softmax(attn_weight[i, :lengths[i]], dim=0).matmul(padded_output[i, :lengths[i]]) for i in range(len(lengths))], dim=0)
@@ -136,7 +135,7 @@ class TS_Model2(nn.Module):
         sentences: PackedSequence,
         bert_sents: torch.TensorType,
         doc_lengths: List[int],
-    ) -> torch.TensorType:
+    ) -> Tuple[torch.TensorType, torch.TensorType]:
         """
         Forward pass of the model.
         """
@@ -162,8 +161,8 @@ class TS_Model2(nn.Module):
                     )
                 )
             # Compute the consecutive sentence pairs' similarities.
-            if self.training: # May be skipped since it is not used outside of loss calculation.
-                sim_scores.append(self.compute_sentence_pair_coherence(doc_out, pair_size=1))
+            # if self.training: # May be skipped since it is not used outside of loss calculation.
+            sim_scores.append(self.compute_sentence_pair_coherence(doc_out, pair_size=1))
     
             # context_embeddings.append(torch.stack(doc_context_embedding))
             doc_outputs.append(torch.cat([doc_out, torch.stack(doc_context_embedding)], -1))
@@ -173,11 +172,14 @@ class TS_Model2(nn.Module):
         del doc_outputs
         torch.cuda.empty_cache()
         encoded_sentences, _ = self.sentence_lstm_2(packed_docs) # Final sentence hidden states.
+        encoded_sentences, _ = pad_packed_sequence(encoded_sentences, batch_first=True) # (batch, max sentence len, 512) 
+        encoded_sentences = [encoded_sentences[i, :doc_lengths[i], :] for i in range(len(doc_lengths))]
+        encoded_sentences = torch.cat(encoded_sentences, 0) # (sentences, 512)
 
-        if self.training:
-            return self.h2s(encoded_sentences), torch.cat(sim_scores, 0).unsqueeze(1)
-        else:
-            return self.h2s(encoded_sentences)
+        # if self.training:
+        return self.h2s(encoded_sentences), torch.cat(sim_scores, 0).unsqueeze(1)
+        # else:
+            # return self.h2s(encoded_sentences)
               
         
 
@@ -258,10 +260,10 @@ class TS_Model2(nn.Module):
             doc_context_outputs.append(torch.stack(local_context_embeddings).squeeze(1))
 
         # Compute the consecutive sentence pairs' similarities.
-        if self.training: # May be skipped since it is not used outside of loss calculation.
-            sim_scores = [self.compute_sentence_pair_coherence(doc_out, pair_size=1) for doc_out in doc_outputs]
-            unsorted_sim_scores = [sim_scores[i] for i in inverse_order(doc_order)]
-            sim_scores = torch.cat(unsorted_sim_scores, 0).unsqueeze(1)
+        # if self.training: # May be skipped since it is not used outside of loss calculation.
+        sim_scores = [self.compute_sentence_pair_coherence(doc_out, pair_size=1) for doc_out in doc_outputs]
+        unsorted_sim_scores = [sim_scores[i] for i in inverse_order(doc_order)]
+        sim_scores = torch.cat(unsorted_sim_scores, 0).unsqueeze(1)
 
         # Concatenate the outputs and turn them into a single padded tensor
         doc_outputs = [torch.cat([doc_outputs[i], doc_context_outputs[i]], -1) for i in range(len(doc_outputs))]
@@ -288,7 +290,7 @@ class TS_Model2(nn.Module):
 
 def zero_state(module, batch_size):
     # * 2 is for the two directions
-    return torch.zeros(module.num_layers * 2, batch_size, module.hidden).to(device), torch.zeros(module.num_layers * 2, batch_size, module.hidden).to(device)
+    return torch.zeros(module.num_layers * 2, batch_size, module.hidden, device=device), torch.zeros(module.num_layers * 2, batch_size, module.hidden, device=device)
 
 def inverse_order(sort_order: np.ndarray) -> np.ndarray:
     """
@@ -301,13 +303,15 @@ def inverse_order(sort_order: np.ndarray) -> np.ndarray:
 def supervised_cross_entropy(
     pred: torch.TensorType,
     sims: torch.TensorType,
-    soft_targets: np.ndarray,
-    target_coh_var: torch.TensorType,
+    soft_targets: torch.LongTensor,
+    target_coh_var: Optional[torch.LongTensor] = None,
     alpha=0.8
     ) -> torch.TensorType:
     """
     Computes the supervised cross entropy loss.
     """
+    if target_coh_var is None:
+        target_coh_var = 1 - soft_targets
     criterion = nn.CrossEntropyLoss()
     bce_criterion = nn.BCELoss()
     loss_pred = criterion(pred, soft_targets)

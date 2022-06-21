@@ -59,8 +59,6 @@ class TS_Model(nn.Module):
         encoded_sentences = self.sentence_encoder(sentences)
         encoded_sentences, _ = self.sentence_lstm(encoded_sentences)
         res = self.h2s(encoded_sentences)
-        # del encoded_sentences, _
-        # torch.cuda.empty_cache()
         return res
 
 

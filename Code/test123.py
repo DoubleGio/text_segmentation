@@ -13,7 +13,7 @@ if __name__ == '__main__':
     # sample = rng.choice(paths, size=4, replace=False)
     # res = l.segment_text(sample)
 
-    k = TextSeg2(language='nl', dataset_path="text_segmentation/Datasets/NLWiki/data", num_workers=0, subset=1000, batch_size=2)
+    k = TextSeg2(language='nl', dataset_path="text_segmentation/Datasets/NLWiki/data", num_workers=2, subset=1000, batch_size=2)
     res = k.run(2)
 
     # paths = get_all_file_names('text_segmentation/Datasets/NLNews/datax/')

@@ -48,10 +48,13 @@ class TextSeg2(TextSeg):
                 bert_model = BertModel.from_pretrained('GroNLP/bert-base-dutch-cased')
             else:
                 raise ValueError(f"Language {language} not supported.")
+        super().__init__(**kwargs)
+        if self.use_cuda:
+            # bert_tokenizer = bert_tokenizer.to(device)
+            bert_model = bert_model.to(device)
         TS_Dataset2.bert_tokenizer = bert_tokenizer
         TS_Dataset2.bert_model = bert_model
         logger.info(f"Loaded BERT model: '{bert_model.name_or_path}'.")
-        super().__init__(**kwargs)
     
     # Override
     def load_data(
@@ -245,24 +248,7 @@ def custom_collate(batch) -> Tuple[torch.Tensor, torch.LongTensor, torch.Tensor,
         batched_targets = torch.from_numpy(batched_targets).long()
     return packed_sents, batched_targets, torch.cat(all_bert), doc_lengths
 
-
-    # b_data = []
-    # b_targets = []
-    # b_bert_sents = []
-    # for data, targets, bert_sents in batch:
-    #     tensored_data = []
-    #     for sentence in data:
-    #         tensored_data.append(torch.FloatTensor(np.concatenate(sentence)).to(device))
-    #     b_data.append(tensored_data)
-    #     tensored_targets = torch.LongTensor(targets).to(device)
-    #     b_targets.append(tensored_targets)
-    #     b_bert_sents.append(bert_sents)
-    # return b_data, b_targets, b_bert_sents
-
 class TS_Dataset2(TS_Dataset):
-
-    bert_tokenizer: BertTokenizer
-    bert_model: BertModel
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -317,127 +303,93 @@ class TS_Dataset2(TS_Dataset):
         data = pad_sequence(data, batch_first=True) # (num_sents, max_sent_len, embed_dim)
         return (data, targets, bert_data) if self.labeled else (data, raw_text, bert_data)
 
-
-    def bert_embed(self, sentences: Union[str, List[str], np.ndarray], batch_size=4) -> torch.FloatTensor:
-        """
-        Returns the BERT embedding(s) of a sentence/list of sentences.
-        This follows the same procedure as the bert-as-service module (which was originally used).
-        """
-        if isinstance(sentences, str):
-            sentences = [sentences]
-        elif isinstance(sentences, np.ndarray):
-            sentences = sentences.tolist()
-        bert_sents = []
-        for i in range(0, len(sentences), batch_size):
-            batch = sentences[i:min(i+batch_size, len(sentences))]
-            tokenized = TS_Dataset2.bert_tokenizer(batch, padding=True, truncation=True, max_length=TS_Dataset2.MAX_SECTION_LEN, return_tensors='pt')
-            # Hidden layers have a shape of (batch_size, max_seq_len, 768) - only the second-to-last layer is used.
-            output_layer = TS_Dataset2.bert_model(**tokenized, output_hidden_states=True).hidden_states[-2]
-            avg_pool = torch.nn.AvgPool2d(kernel_size=(output_layer.shape[1], 1)) # Take the average of the layer on the time (sequence) axis.
-            bert_sents.append(avg_pool(output_layer).squeeze(dim=1).detach())
-
-        return torch.cat(bert_sents) # shape = (len(sentences), 768)
-
-
-class TS_Dataset22(Dataset):
-    """
-    Custom Text Segmentation Dataset class for use in Dataloaders.
-    Includes BERT sentence embeddings. TODO: Precalculate embeddings?
-    """
-    def __init__(
-        self,files: List[str],
-        word2vec: KeyedVectors,
-        bert_tokenizer: BertTokenizer,
-        bert_model: BertModel,
-        from_wiki=False,
-        labeled=True
-        ) -> None:
-        """
-        files: List of strings pointing towards files to read.
-        word2vec: KeyedVectors object containing the word2vec model.
-        from_wiki: Boolean indicating whether the dataset follows Wikipedia formatting and requires some extra preprocessing.
-        """
-        self.files = files
-        self.word2vec = word2vec
-        self.from_wiki = from_wiki
-        self.bert_tokenizer = bert_tokenizer
-        self.bert_model = bert_model
-        self.labeled = labeled
-
-    def __getitem__(self, index: int) -> Tuple[List, List[int], torch.FloatTensor]:
-        """
-        For a document at index, with n sentences, returns:
-            data: List of n sentence representations (made out of word vectors).
-            labels: List of n-1 labels [0 or 1]; a 1 signifies the END of a section (hence the last label is discarded).
-            bert_sents: Tensor of BERT sentence embeddings with shape (n, 768).
-        """
-        with open(self.files[index], 'r') as f:
-            text = f.read()
-        sections = sectioned_clean_text(text)
+    # Override
+    def get_data_targets(self, index: int) -> Tuple[torch.FloatTensor, np.ndarray, torch.FloatTensor]:
+        """Get the data, targets and bert embeddings for a document at index."""
+        text = self.get_text(index)
         data = []
-        labels = []
-        bert_sents = []
+        targets = np.array([], dtype=int)
+        bert_mask = np.array([], dtype=bool) # Keeps track of which sentences are kept
 
-        for i, section in enumerate(sections):
-            try:
-                sentences = sent_tokenize(section)
-                sentence_labels = np.zeros(len(sentences), dtype=int)
-                for sentence in sentences:
-                    sentence_words = self.word_tokenize(sentence)
-                    if len(sentence_words) > 0:
-                        sentence_representation = [self.model_word(word) for word in sentence_words]
-                        data.append(sentence_representation)
-                    else:
-                        sentence_labels = sentence_labels[:-1]
+        sections = sectioned_clean_text(text, from_wiki=self.from_wiki)
+        suitable_sections_count = 0
+        for section in sections:
+            sentences = sent_tokenize(section)
+            if not (TS_Dataset.MAX_SECTION_LEN > len(sentences) > 1): # Filter too short or too long sections.
+                if len(sections) <= 2: # Skip docs that end up with just a single section
+                    break
+                bert_mask = np.append(bert_mask, np.zeros(len(sentences), dtype=bool))
+                continue
+            
+            section_len = 0
+            for sentence in sentences:
+                sentence_words = word_tokenize(sentence)
+                if len(sentence_words) > 0:
+                    sentence_emb = self.embed_words(sentence_words)
+                    if len(sentence_emb) > 0:
+                        section_len += 1
+                        data.append(sentence_emb)
+                        bert_mask = np.append(bert_mask, True)
+                        continue
+                bert_mask = np.append(bert_mask, False)
+                    
+            if section_len > 0:
+                sentence_labels = np.zeros(section_len, dtype=int)
                 sentence_labels[-1] = 1 # Last sentence ends a section --> 1.
-                labels += sentence_labels.tolist()
-                bert_sents.append(self.bert_embed(sentences))
-            except ValueError:
-                logging.warning(f"Section {i + 1} in {self.files[index]} is empty.")
-            # if len(data) > 0:
-                # labels.append(len(data) - 1) # NOTE: this points towards the END of a segment.
+                targets = np.append(targets, sentence_labels)
+                suitable_sections_count += 1
 
-        return data, labels[:-1], torch.cat(bert_sents)
+        # Get a random document if the current one is empty or has less than two suitable sections.
+        if len(data) == 0 or suitable_sections_count < 2:
+            return self.__getitem__(rng.integers(0, len(self.texts)))
 
-    def __len__(self) -> int:
-        """
-        Returns the length of the dataset.
-        """
-        return len(self.files)
+        bert_data = torch.load(self.texts[index].replace('data', 'data_bert') + '.pt')
+        data = pad_sequence(data, batch_first=True) # (num_sents, max_sent_len, embed_dim)
+        return data, targets, bert_data[bert_mask, :]
 
-    def bert_embed(self, sentences: Union[str, List[str]], batch_size=8) -> torch.FloatTensor:
-        """
-        Returns the BERT embedding(s) of a sentence/list of sentences.
-        This follows the same procedure as the bert-as-service module (which was originally used).
-        """
-        if isinstance(sentences, str):
-            sentences = [sentences]
-        bert_sents = []
-        for i in range(0, len(sentences), batch_size):
-            batch = sentences[i:min(i+batch_size, len(sentences))]
-            tokenized = self.bert_tokenizer(batch, padding=True, return_tensors='pt') # Pad to max seq length in batch.
-            # Hidden layers have a shape of (batch_size, max_seq_len, 768) - only the second-to-last layer is used.
-            output_layer = self.bert_model(**tokenized, output_hidden_states=True).hidden_states[-2]
-            avg_pool = torch.nn.AvgPool2d(kernel_size=(output_layer.shape[1], 1)) # Take the average of the layer on the time (sequence) axis.
-            bert_sents.append(avg_pool(output_layer).squeeze(dim=1).detach())
+    def get_data_raw(self, index: int) -> Tuple[torch.FloatTensor, np.ndarray, torch.FloatTensor]:
+        text = self.get_text(index)
+        data = []
+        raw_text = np.array([])
+        bert_mask = np.array([], dtype=bool) # Keeps track of which sentences are kept
 
-        return torch.cat(bert_sents) # shape = (len(sentences), 768)
+        text = clean_text(text, from_wiki=self.from_wiki)
+        sentences = sent_tokenize(text)
+        for sentence in sentences:
+            sentence_words = word_tokenize(sentence)
+            if len(sentence_words) > 0:
+                sentence_emb = self.embed_words(sentence_words)
+                if len(sentence_emb) > 0:
+                    data.append(sentence_emb)
+                    raw_text = np.append(raw_text, sentence)
+                    bert_mask = np.append(bert_mask, True)
+                    continue
+            bert_mask = np.append(bert_mask, False)
+            
+        if len(data) == 0:
+            return None, None
+        
+        bert_data = torch.load(self.texts[index].replace('data', 'data_bert') + '.pt')
+        data = pad_sequence(data, batch_first=True) # (num_sents, max_sent_len, embed_dim)
+        return data, raw_text, bert_data[bert_mask, :]
 
-    def word_tokenize(self, sentence: str) -> List[str]:
-        """
-        sentence: String to tokenize.
-        wiki_remove: Whether to remove special wiki tokens (e.g. '***LIST***').
-        """
-        if self.from_wiki:
-            for token in ["***LIST***", "***formula***", "***codice***"]:
-                sentence = sentence.replace(token, "")
-        return regexp_tokenize(sentence, pattern=r'[\wÀ-ÖØ-öø-ÿ\-\']+')
 
-    def model_word(self, word):
-        if self.word2vec:
-            if word in self.word2vec:
-                return self.word2vec[word].reshape(1, 300)
-            else:
-                return self.word2vec['UNK'].reshape(1, 300)
-        else:
-            return rng.standard_normal(size=(1,300))
+def _bert_embed(self, sentences: Union[str, List[str], np.ndarray], batch_size=4) -> torch.FloatTensor:
+    """
+    Returns the BERT embedding(s) of a sentence/list of sentences.
+    This follows the same procedure as the bert-as-service module (which was originally used).
+    """
+    if isinstance(sentences, str):
+        sentences = [sentences]
+    elif isinstance(sentences, np.ndarray):
+        sentences = sentences.tolist()
+    bert_sents = []
+    for i in range(0, len(sentences), batch_size):
+        batch = sentences[i:min(i+batch_size, len(sentences))]
+        tokenized = TS_Dataset2.bert_tokenizer(batch, padding=True, truncation=True, max_length=TS_Dataset2.MAX_SECTION_LEN, return_tensors='pt').to(device)
+        # Hidden layers have a shape of (batch_size, max_seq_len, 768) - only the second-to-last layer is used.
+        output_layer = TS_Dataset2.bert_model(**tokenized, output_hidden_states=True).hidden_states[-2]
+        avg_pool = torch.nn.AvgPool2d(kernel_size=(output_layer.shape[1], 1)) # Take the average of the layer on the time (sequence) axis.
+        bert_sents.append(avg_pool(output_layer).squeeze(dim=1).detach())
+
+    return torch.cat(bert_sents).cpu() # shape = (len(sentences), 768)

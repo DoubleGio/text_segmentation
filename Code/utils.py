@@ -1,7 +1,7 @@
 import re, os, shutil, logging
 from functools import partial, partialmethod
 from tqdm import tqdm
-from typing import List, Optional, Union, Tuple, Iterable
+from typing import Generator, List, Optional, Union, Tuple, Iterable
 from nltk.tokenize import sent_tokenize, regexp_tokenize
 from nltk.metrics.segmentation import pk, windowdiff
 
@@ -96,6 +96,12 @@ def get_all_file_names(dir: str) -> List[str]:
     if len(res) == 0:
         raise ValueError(f"No files found in {dir}")
     return res
+
+def yield_all_file_names(dir: str) -> Generator[str, None, None]:
+    for root, _, files in os.walk(dir):
+        for file in files:
+            if os.path.isfile(os.path.join(root, file)):
+                yield os.path.join(root, file)
 
 def get_truth(clean_text: Union[str, List[str]]) -> List[int]:
     """

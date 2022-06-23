@@ -1,5 +1,7 @@
 from textseg2 import TextSeg2
 from textseg import TextSeg
+from bertifier import CustomPipeline
+from transformers import BertModel, BertTokenizer
 from utils import *
 import numpy as np
 rng = np.random.default_rng()
@@ -13,12 +15,22 @@ if __name__ == '__main__':
     # sample = rng.choice(paths, size=4, replace=False)
     # res = l.segment_text(sample)
 
-    k = TextSeg2(language='nl', dataset_path="text_segmentation/Datasets/NLWiki/data", num_workers=2, subset=1000, batch_size=2)
-    res = k.run(2)
+    # k = TextSeg2(language='en', dataset_path="text_segmentation/Datasets/ENWiki/data_subset", num_workers=2, subset=1000, batch_size=2)
+    # res = k.run(1)
+
+    # text_segmentation/Datasets/NLWiki/data/213000-213999/wiki_213555
 
     # paths = get_all_file_names('text_segmentation/Datasets/NLNews/datax/')
     # sample = rng.choice(paths, size=3, replace=False)
     # model_path = "checkpoints/textseg/NLNews_15-06_18-50/best_model"
     # ts = TextSeg(language='nl', load_from=model_path)
     # res = ts.segment_text(sample)
-    print(res)
+    # print(res)
+
+    with open('text_segmentation/Datasets/NLWiki/data/213000-213999/wiki_213555', 'r') as f:
+        text = f.read()
+    t1 = clean_text(text, from_wiki=True)
+    print(len(sent_tokenize(t1)))
+
+    t2 = sectioned_clean_text(text, from_wiki=True)
+    print(sum([len(sent_tokenize(t)) for t in t2]))

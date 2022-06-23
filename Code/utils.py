@@ -19,9 +19,7 @@ def clean_text(text: str, mark_sections=False, from_wiki=False) -> str:
     If mark_sections=True, add SECTION_MARK to mark section beginnings.
     """
     if from_wiki:
-        text = re.sub(r'^(?:(<doc)|(\n<\/doc)).*\n+', '', text, flags=re.MULTILINE)
-        for token in ["***LIST***", "***formula***", "***codice***"]:
-            text = text.replace(token, "")
+        text = remove_wiki_markup(text)
     if mark_sections:
         text = re.sub(r'^=+.*\n+', SECTION_MARK, text, flags=re.MULTILINE)
     else:
@@ -34,17 +32,28 @@ def sectioned_clean_text(text: str, from_wiki=False) -> List[str]:
     Split text into sections (without header marks).
     """
     if from_wiki:
-        text = re.sub(r'^(?:(<doc)|(\n<\/doc)).*\n+', '', text, flags=re.MULTILINE)
-        for token in ["***LIST***", "***formula***", "***codice***"]:
-            text = text.replace(token, "")
-    split = re.split(r'^=+.*\n+', text, flags=re.MULTILINE)
+        text = remove_wiki_markup(text)
+    split = re.split(fr'^=+.*\n+', text, flags=re.MULTILINE)
     return list(filter(None, split))
 
+def remove_wiki_markup(text: str) -> str:
+    """Removes wiki-header and footer."""
+    text = re.sub(r'^(?:(<doc)|(\n<\/doc)).*\n+', '', text, flags=re.MULTILINE)
+    for token in ["***LIST***", "***formula***", "***codice***"]:
+        text = text.replace(token, "")
+    return text
+
+def sent_tokenize_plus(text: str) -> List[str]:
+    """Extends nltk sent_tokenize by also splitting sentences on newlines."""
+    text = re.split(r'\n', text, flags=re.MULTILINE)
+    res = []
+    for t in text:
+        res += sent_tokenize(t)
+    return res
+
 def word_tokenize(sentence: str) -> List[str]:
-        """
-        sentence: String to tokenize.
-        """
-        return regexp_tokenize(sentence.lower(), pattern=r'[\wÀ-ÖØ-öø-ÿ\-\']+')
+    """sentence: String to tokenize."""
+    return regexp_tokenize(sentence.lower(), pattern=r'[\wÀ-ÖØ-öø-ÿ\-\']+')
 
 def compute_metrics(predictions: Iterable[int], ground_truth: Iterable[int], k: Optional[int] = None, quiet=True) -> Tuple[float, float]:
     """
@@ -105,11 +114,12 @@ def yield_all_file_names(dir: str) -> Generator[str, None, None]:
 
 def get_truth(clean_text: Union[str, List[str]]) -> List[int]:
     """
+    clean_text = text or list of sentences.
     Returns a list containing a 1 or 0 for each sentence, 
     signifying whether a section starts here or not, respectively.
     """
     if isinstance(clean_text, str):
-        clean_text = sent_tokenize(clean_text)
+        clean_text = sent_tokenize_plus(clean_text)
     if not clean_text[0].startswith(SECTION_MARK):
         raise ValueError(f"Text sections_marks are not found/marked with {SECTION_MARK}")
     return [1 if s.startswith(SECTION_MARK) else 0 for s in clean_text]

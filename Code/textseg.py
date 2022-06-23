@@ -6,13 +6,11 @@ from sklearn.model_selection import train_test_split
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
-from torch.nn.utils.rnn import pack_sequence, pad_sequence
 from torch.utils.tensorboard import SummaryWriter
-from typing import Callable, List, Optional, Tuple, Type
+from typing import Callable, Generator, List, Optional, Tuple, Type
 from TS_Dataset import TS_Dataset, custom_collate
 from tqdm import tqdm
-from nltk import sent_tokenize
-from datetime import datetime
+from datetime import datetime, timedelta
 import numpy as np
 rng = np.random.default_rng()
 from utils import get_all_file_names, clean_text, sectioned_clean_text, compute_metrics, LoggingHandler, word_tokenize
@@ -199,7 +197,7 @@ class TextSeg:
                     non_improvement_count += 1
                 pbar.update(1)
                 gc.collect()
-            logger.info(f"Total time elapsed: {pbar.format_dict['elapsed']}")
+            logger.info(f"Total time elapsed: {str(timedelta(seconds=int(pbar.format_dict['elapsed'])))}")
         writer.close()
         return best_val_scores
     
@@ -273,9 +271,7 @@ class TextSeg:
                 if pbar.n > self.subsets['train']:
                     break
                 if self.use_cuda:
-                    sents = sents.to(device, non_blocking=True)
-                    targets = targets.to(device, non_blocking=True)
-                    doc_lengths = doc_lengths.to(device, non_blocking=True)
+                    sents, targets, doc_lengths = self.move_to_cuda(sents, targets, doc_lengths)
                 model.zero_grad()
                 output = model(sents)
                 del sents
@@ -307,9 +303,7 @@ class TextSeg:
                     if pbar.n > self.subsets['val']:
                         break
                     if self.use_cuda:
-                        sents = sents.to(device, non_blocking=True)
-                        targets = targets.to(device, non_blocking=True)
-                        doc_lengths = doc_lengths.to(device, non_blocking=True)
+                        sents, targets, doc_lengths = self.move_to_cuda(sents, targets, doc_lengths)
                     output = model(sents)
                     del sents
                     output, targets, doc_lengths = self.remove_last(output, targets, doc_lengths)
@@ -355,9 +349,7 @@ class TextSeg:
                     if pbar.n > self.subsets['test']:
                         break
                     if self.use_cuda:
-                        sents = sents.to(device, non_blocking=True)
-                        targets = targets.to(device, non_blocking=True)
-                        doc_lengths = doc_lengths.to(device, non_blocking=True)
+                        sents, targets, doc_lengths = self.move_to_cuda(sents, targets, doc_lengths)
                     output = model(sents)
                     del sents
                     output, targets, doc_lengths = self.remove_last(output, targets, doc_lengths)
@@ -395,6 +387,10 @@ class TextSeg:
         
         return x_adj, y_adj, lengths
 
+    def move_to_cuda(self, *tensors: torch.TensorType) -> Generator[torch.TensorType, None, None]:
+        """Moves all given tensors to device."""
+        for t in tensors:
+            yield t.to(device, non_blocking=True)
 
 def main(args):
     ts = TextSeg(

@@ -1,9 +1,6 @@
-import logging, os
-from datetime import datetime
+import logging
 from textseg2_model import create_model2, supervised_cross_entropy
 from textseg import TextSeg, TS_Dataset
-from gensim.models import KeyedVectors
-from sklearn.model_selection import train_test_split
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
@@ -11,12 +8,11 @@ from torch.nn.utils.rnn import pack_sequence, pad_sequence
 from torch.utils.tensorboard import SummaryWriter
 from typing import Callable, List, Optional, Tuple, Union
 from tqdm import tqdm
-from nltk import regexp_tokenize, sent_tokenize
 import numpy as np
 from transformers import logging as tlogging
 from transformers import BertTokenizer, BertModel
 rng = np.random.default_rng()
-from utils import get_all_file_names, sectioned_clean_text, compute_metrics, LoggingHandler, clean_text, word_tokenize
+from utils import sent_tokenize_plus, get_all_file_names, sectioned_clean_text, compute_metrics, LoggingHandler, clean_text, word_tokenize
 
 W2V_NL_PATH = 'text_segmentation/Datasets/word2vec-nl-combined-160.txt' # Taken from https://github.com/clips/dutchembeddings
 EARLY_STOP = 4
@@ -33,28 +29,28 @@ class TextSeg2(TextSeg):
     Extended with the enhancements from https://github.com/lxing532/improve_topic_seg.
     """
 
-    def __init__(self, bert_name: Optional[str] = None, **kwargs) -> None:
-        # TODO: precalculate embeddings
-        language = kwargs.get('language')
-        if bert_name:
-            bert_tokenizer = BertTokenizer.from_pretrained(bert_name)
-            bert_model = BertModel.from_pretrained(bert_name)
-        elif language:
-            if language == 'en' or language == 'test':
-                bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-                bert_model = BertModel.from_pretrained('bert-base-uncased')
-            elif language == 'nl':
-                bert_tokenizer = BertTokenizer.from_pretrained('GroNLP/bert-base-dutch-cased')
-                bert_model = BertModel.from_pretrained('GroNLP/bert-base-dutch-cased')
-            else:
-                raise ValueError(f"Language {language} not supported.")
-        super().__init__(**kwargs)
-        if self.use_cuda:
-            # bert_tokenizer = bert_tokenizer.to(device)
-            bert_model = bert_model.to(device)
-        TS_Dataset2.bert_tokenizer = bert_tokenizer
-        TS_Dataset2.bert_model = bert_model
-        logger.info(f"Loaded BERT model: '{bert_model.name_or_path}'.")
+    # def __init__(self, bert_name: Optional[str] = None, **kwargs) -> None:
+    #     # TODO: precalculate embeddings
+    #     language = kwargs.get('language')
+    #     if bert_name:
+    #         bert_tokenizer = BertTokenizer.from_pretrained(bert_name)
+    #         bert_model = BertModel.from_pretrained(bert_name)
+    #     elif language:
+    #         if language == 'en' or language == 'test':
+    #             bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+    #             bert_model = BertModel.from_pretrained('bert-base-uncased')
+    #         elif language == 'nl':
+    #             bert_tokenizer = BertTokenizer.from_pretrained('GroNLP/bert-base-dutch-cased')
+    #             bert_model = BertModel.from_pretrained('GroNLP/bert-base-dutch-cased')
+    #         else:
+    #             raise ValueError(f"Language {language} not supported.")
+    #     super().__init__(**kwargs)
+    #     if self.use_cuda:
+    #         # bert_tokenizer = bert_tokenizer.to(device)
+    #         bert_model = bert_model.to(device)
+    #     TS_Dataset2.bert_tokenizer = bert_tokenizer
+    #     TS_Dataset2.bert_model = bert_model
+    #     logger.info(f"Loaded BERT model: '{bert_model.name_or_path}'.")
     
     # Override
     def load_data(
@@ -115,10 +111,7 @@ class TextSeg2(TextSeg):
                 if pbar.n > self.subsets['train']:
                     break
                 if self.use_cuda:
-                    sents = sents.to(device, non_blocking=True)
-                    bert_sents = bert_sents.to(device, non_blocking=True)
-                    targets = targets.to(device, non_blocking=True)
-                    doc_lengths = doc_lengths.to(device, non_blocking=True)
+                    sents, targets, bert_sents, doc_lengths = self.move_to_cuda(sents, targets, bert_sents, doc_lengths)
                 model.zero_grad()
                 output, sim_scores = model(sents, bert_sents, doc_lengths)
                 del sents, bert_sents
@@ -151,9 +144,7 @@ class TextSeg2(TextSeg):
                     if pbar.n > self.subsets['val']:
                         break
                     if self.use_cuda:
-                        sents = sents.to(device, non_blocking=True)
-                        targets = targets.to(device, non_blocking=True)
-                        doc_lengths = doc_lengths.to(device, non_blocking=True)
+                        sents, targets, bert_sents, doc_lengths = self.move_to_cuda(sents, targets, bert_sents, doc_lengths)
                     output, sim_scores = model(sents, bert_sents, doc_lengths)
                     del sents, bert_sents
                     output, targets, doc_lengths = self.remove_last(output, targets, doc_lengths)
@@ -200,9 +191,7 @@ class TextSeg2(TextSeg):
                     if pbar.n > self.subsets['test']:
                         break
                     if self.use_cuda:
-                        sents = sents.to(device, non_blocking=True)
-                        targets = targets.to(device, non_blocking=True)
-                        doc_lengths = doc_lengths.to(device, non_blocking=True)
+                        sents, targets, bert_sents, doc_lengths = self.move_to_cuda(sents, targets, bert_sents, doc_lengths)
                     output, _ = model(sents, bert_sents, doc_lengths)
                     del sents, bert_sents
                     output, targets, doc_lengths = self.remove_last(output, targets, doc_lengths)
@@ -254,56 +243,6 @@ class TS_Dataset2(TS_Dataset):
         super().__init__(*args, **kwargs)
     
     # Override
-    def __getitem__(self, index: int) -> Tuple[torch.FloatTensor, np.ndarray, torch.FloatTensor]:
-        """
-        For a document at index, returns:
-            data: List of n sentence embeddings (made out of word vectors).
-
-            targets: List of n target labels [0 or 1]; a 1 signifies the END of a section (hence the last sentence/label is discarded later).
-             OR
-            raw_text: List containing the text of the sentences of the document.
-
-            bert_sents: List of n BERT sentence embeddings.
-        """
-        text = self.get_text(index)
-        data = []
-        targets = np.array([], dtype=int)
-        raw_text = np.array([])
-        
-        sections = sectioned_clean_text(text, from_wiki=self.from_wiki)
-        suitable_sections_count = 0
-        for section in sections:
-            sentences = sent_tokenize(section)
-            if not (TS_Dataset2.MAX_SECTION_LEN > len(sentences) > 1): # Filter out empty or too long sections.
-                if len(sections) <= 2: # Skip docs that end up with just a single section
-                    break
-                continue
-            
-            section_len = 0
-            for sentence in sentences:
-                sentence_words = word_tokenize(sentence)
-                if len(sentence_words) > 0:
-                    sentence_emb = self.embed_words(sentence)
-                    if len(sentence_emb) > 0:
-                        section_len += 1
-                        data.append(sentence_emb)
-                        raw_text = np.append(raw_text, sentence)
-                    
-            if section_len > 0:
-                sentence_labels = np.zeros(section_len, dtype=int)
-                sentence_labels[-1] = 1 # Last sentence ends a section --> 1.
-                targets = np.append(targets, sentence_labels)
-                suitable_sections_count += 1
-            
-        # Get a random document if the current one is empty or has less than two suitable sections.
-        if len(data) == 0 or suitable_sections_count < 2:
-            return self.__getitem__(rng.integers(0, len(self.texts)))
-
-        bert_data = self.bert_embed(raw_text)
-        data = pad_sequence(data, batch_first=True) # (num_sents, max_sent_len, embed_dim)
-        return (data, targets, bert_data) if self.labeled else (data, raw_text, bert_data)
-
-    # Override
     def get_data_targets(self, index: int) -> Tuple[torch.FloatTensor, np.ndarray, torch.FloatTensor]:
         """Get the data, targets and bert embeddings for a document at index."""
         text = self.get_text(index)
@@ -314,7 +253,7 @@ class TS_Dataset2(TS_Dataset):
         sections = sectioned_clean_text(text, from_wiki=self.from_wiki)
         suitable_sections_count = 0
         for section in sections:
-            sentences = sent_tokenize(section)
+            sentences = sent_tokenize_plus(section)
             if not (TS_Dataset.MAX_SECTION_LEN > len(sentences) > 1): # Filter too short or too long sections.
                 if len(sections) <= 2: # Skip docs that end up with just a single section
                     break
@@ -345,16 +284,19 @@ class TS_Dataset2(TS_Dataset):
 
         bert_data = torch.load(self.texts[index].replace('data', 'data_bert') + '.pt')
         data = pad_sequence(data, batch_first=True) # (num_sents, max_sent_len, embed_dim)
+        if bert_data.size(0) != len(bert_mask):
+            logger.warning('oops')
         return data, targets, bert_data[bert_mask, :]
 
     def get_data_raw(self, index: int) -> Tuple[torch.FloatTensor, np.ndarray, torch.FloatTensor]:
+        """Get the data, raw text and bert embeddings for a document at index."""
         text = self.get_text(index)
         data = []
         raw_text = np.array([])
         bert_mask = np.array([], dtype=bool) # Keeps track of which sentences are kept
 
         text = clean_text(text, from_wiki=self.from_wiki)
-        sentences = sent_tokenize(text)
+        sentences = sent_tokenize_plus(text)
         for sentence in sentences:
             sentence_words = word_tokenize(sentence)
             if len(sentence_words) > 0:

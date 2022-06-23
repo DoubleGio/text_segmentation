@@ -4,8 +4,7 @@ from torch.utils.data import Dataset
 from torch.nn.utils.rnn import pad_sequence, pack_sequence
 from gensim.models import KeyedVectors
 from typing import Optional, List, Tuple
-from nltk import sent_tokenize
-from utils import sectioned_clean_text, clean_text, word_tokenize
+from utils import sent_tokenize_plus, sectioned_clean_text, clean_text, word_tokenize
 rng = np.random.default_rng()
 
 class TS_Dataset(Dataset):
@@ -58,7 +57,7 @@ class TS_Dataset(Dataset):
         sections = sectioned_clean_text(text, from_wiki=self.from_wiki)
         suitable_sections_count = 0
         for section in sections:
-            sentences = sent_tokenize(section)
+            sentences = sent_tokenize_plus(section)
             if not (TS_Dataset.MAX_SECTION_LEN > len(sentences) > 1): # Filter too short or too long sections.
                 if len(sections) <= 2: # Skip docs that end up with just a single section
                     break
@@ -93,7 +92,7 @@ class TS_Dataset(Dataset):
         raw_text = np.array([])
 
         text = clean_text(text, from_wiki=self.from_wiki)
-        sentences = sent_tokenize(text)
+        sentences = sent_tokenize_plus(text)
         for sentence in sentences:
             sentence_words = word_tokenize(sentence)
             if len(sentence_words) > 0:

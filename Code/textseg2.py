@@ -1,16 +1,19 @@
-import logging
+import logging, argparse
 from textseg2_model import create_model2, supervised_cross_entropy
-from textseg import TextSeg, TS_Dataset
+from textseg import TextSeg
+from TS_Dataset import TS_Dataset
+from TS_Pipeline import TS_Pipeline
 import torch
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+from sklearn.model_selection import train_test_split
 from torch.nn.utils.rnn import pack_sequence, pad_sequence
 from torch.utils.tensorboard import SummaryWriter
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Callable, List, Optional, Tuple, Dict, Any
 from tqdm import tqdm
 import numpy as np
 from transformers import logging as tlogging
-from transformers import BertTokenizer, BertModel
+from transformers import BertTokenizer, BertModel, BatchEncoding
+from gensim.models import KeyedVectors
 rng = np.random.default_rng()
 from utils import sent_tokenize_plus, get_all_file_names, sectioned_clean_text, compute_metrics, LoggingHandler, clean_text, word_tokenize
 
@@ -28,87 +31,63 @@ class TextSeg2(TextSeg):
     Updated implementation of https://github.com/koomri/text-segmentation.
     Extended with the enhancements from https://github.com/lxing532/improve_topic_seg.
     """
+  
+    def __init__(self, bert_name: Optional[str] = None, **kwargs) -> None:
+        if bert_name:
+            # 'bert-base-uncased' = EN
+            # 'GroNLP/bert-base-dutch-cased' = NL
+            self.load_data = self.load_pipeline(bert_name)
+        else:
+            self.load_data = self.load_dataset
+        super().__init__(**kwargs)
 
-    # def __init__(self, bert_name: Optional[str] = None, **kwargs) -> None:
-    #     # TODO: precalculate embeddings
-    #     language = kwargs.get('language')
-    #     if bert_name:
-    #         bert_tokenizer = BertTokenizer.from_pretrained(bert_name)
-    #         bert_model = BertModel.from_pretrained(bert_name)
-    #     elif language:
-    #         if language == 'en' or language == 'test':
-    #             bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-    #             bert_model = BertModel.from_pretrained('bert-base-uncased')
-    #         elif language == 'nl':
-    #             bert_tokenizer = BertTokenizer.from_pretrained('GroNLP/bert-base-dutch-cased')
-    #             bert_model = BertModel.from_pretrained('GroNLP/bert-base-dutch-cased')
-    #         else:
-    #             raise ValueError(f"Language {language} not supported.")
-    #     super().__init__(**kwargs)
-    #     if self.use_cuda:
-    #         # bert_tokenizer = bert_tokenizer.to(device)
-    #         bert_model = bert_model.to(device)
-    #     TS_Dataset2.bert_tokenizer = bert_tokenizer
-    #     TS_Dataset2.bert_model = bert_model
-    #     logger.info(f"Loaded BERT model: '{bert_model.name_or_path}'.")
-    
-    # Override
-    def load_data(
-        self,
-        dataset_path: str,
-        from_wiki: bool,
-        splits: List[float],
-        batch_size: int,
-        num_workers: int,
-    ) -> None:
-        super().load_data(dataset_path, from_wiki, splits, batch_size, num_workers, TS_Dataset2, custom_collate)
+    def load_pipeline(self, bert_name: str) -> Callable:
+        bert_tokenizer = BertTokenizer.from_pretrained(bert_name)
+        bert_model = BertModel.from_pretrained(bert_name)
+
+        def _load_pipeline(
+            dataset_path: str,
+            from_wiki: bool,
+            splits: List[float],
+            batch_size: int,
+            num_workers: int,
+            word2vec: Optional[KeyedVectors] = None,
+            subset = np.inf
+        ) -> None:
+            self.dataset_name = dataset_path.split('/')[-2]
+            path_list = get_all_file_names(dataset_path)
+
+            # Split and shuffle the data
+            train_paths, test_paths = train_test_split(path_list, test_size=1-splits[0])
+            val_paths, test_paths = train_test_split(test_paths, test_size=splits[1]/(splits[1]+splits[2]))
+
+            pipe = Textseg2Pipeline(word2vec, bert_tokenizer, bert_model, device, batch_size, num_workers, from_wiki=from_wiki)
+            self.train_loader = pipe(train_paths)
+            self.val_loader = pipe(val_paths)
+            self.test_loader = pipe(test_paths)
+
+            if subset < len(path_list):
+                self.sizes = {'train': int(subset * splits[0]), 'val': int(subset * splits[1]), 'test': int(subset * splits[2])}
+                logger.info(f"Subsets: train {self.sizes['train']}, validate {self.sizes['val']}, test {self.sizes['test']}")
+            else:
+                self.sizes = {'train': len(self.train_loader), 'val': len(self.val_loader), 'test': len(self.val_loader)}
+            
+        return _load_pipeline
+
+    def load_dataset(self, **kwargs) -> None:
+        super().load_data(**kwargs, dataset_class=TS_Dataset2, collate_fn=custom_collate)
 
     # Override
     def initialize_run(self, resume=False, model_creator: Callable = create_model2):
         return super().initialize_run(resume, model_creator)
 
     # Override
-    def train_old(self, model, optimizer, writer) -> None:
-        model.train()
-        total_loss = 0.0
-        with tqdm(desc=f'Training #{self.current_epoch}', total=len(self.train_loader.dataset), leave=False) as pbar:
-            for data, labels, bert_sents, doc_lengths in self.train_loader:
-                data, bert_sents = data.to(device), bert_sents.to(device)
-                model.zero_grad()
-                output, sim_scores = model(data, bert_sents, doc_lengths)
-                del data, bert_sents
-                torch.cuda.empty_cache()
-                #TODO:
-                target_var = torch.cat(labels, dim=0).to(device)
-
-                # Generate the ground truth for coherence scores...
-                target_list = target_var.cpu().detach().numpy() # convert to numpy array
-                target_coh = []
-                for t in target_list:
-                    if t == 0:
-                        target_coh.append(1)
-                    else:
-                        target_coh.append(0)
-                target_coh = torch.LongTensor(target_coh).to(device)
-
-                loss = supervised_cross_entropy(output, sim_scores, target_var, target_coh)
-                loss.backward()
-                optimizer.step()
-                total_loss += loss.item()
-
-                pbar.set_postfix(loss=loss.item())
-                pbar.update(len(data))
-        train_loss = total_loss / len(self.train_loader) # Average loss per batch.
-        logger.info(f"Training Epoch {self.current_epoch + 1} --- Loss = {train_loss:.4}")
-        writer.add_scalar('Loss/train', train_loss, self.current_epoch + 1)
-
-    # Override
     def train(self, model, optimizer, writer) -> None:
         model.train()
         total_loss = torch.tensor(0.0, device=device)
-        with tqdm(desc=f'Training #{self.current_epoch}', total=min(len(self.train_loader.dataset), self.subsets['train']), leave=False) as pbar:
-            for sents, targets, bert_sents, doc_lengths in self.train_loader:
-                if pbar.n > self.subsets['train']:
+        with tqdm(desc=f'Training #{self.current_epoch}', total=self.sizes['train'], leave=False) as pbar:
+            for bert_sents, sents, targets, doc_lengths in self.train_loader:
+                if pbar.n > self.sizes['train']:
                     break
                 if self.use_cuda:
                     sents, targets, bert_sents, doc_lengths = self.move_to_cuda(sents, targets, bert_sents, doc_lengths)
@@ -131,17 +110,16 @@ class TextSeg2(TextSeg):
         logger.info(f"Training Epoch {self.current_epoch + 1} --- Loss = {train_loss:.4}")
         writer.add_scalar('Loss/train', train_loss, self.current_epoch)
 
-
     # Override
-    def validate(self, model, writer) -> Tuple[float, float, float]:
+    def validate(self, model, writer: SummaryWriter) -> Tuple[float, float, float]:
         model.eval()
         thresholds = np.arange(0, 1, 0.05)
         scores = {k: [] for k in thresholds} # (pk, windowdiff) scores for each threshold.
         total_loss = torch.tensor(0.0, device=device)
-        with tqdm(desc=f"Validating #{self.current_epoch}", total=min(len(self.val_loader.dataset), self.subsets['val']), leave=False) as pbar:
-            with torch.no_grad():
-                for sents, targets, bert_sents, doc_lengths in self.val_loader:
-                    if pbar.n > self.subsets['val']:
+        with tqdm(desc=f"Validating #{self.current_epoch}", total=self.sizes['val'], leave=False) as pbar:
+            with torch.inference_mode():
+                for bert_sents, sents, targets, doc_lengths in self.val_loader:
+                    if pbar.n > self.sizes['val']:
                         break
                     if self.use_cuda:
                         sents, targets, bert_sents, doc_lengths = self.move_to_cuda(sents, targets, bert_sents, doc_lengths)
@@ -185,10 +163,10 @@ class TextSeg2(TextSeg):
     def test(self, model, threshold: float, writer: Optional[SummaryWriter]) -> Tuple[float, float]:
         model.eval()
         scores = []
-        with tqdm(desc=f'Testing #{self.current_epoch}', total=min(len(self.test_loader.dataset), self.subsets['test']), leave=False) as pbar:
-            with torch.no_grad():
-                for sents, targets, bert_sents, doc_lengths in self.test_loader:
-                    if pbar.n > self.subsets['test']:
+        with tqdm(desc=f'Testing #{self.current_epoch}', total=self.sizes['test'], leave=False) as pbar:
+            with torch.inference_mode():
+                for bert_sents, sents, targets, doc_lengths in self.test_loader:
+                    if pbar.n > self.sizes['test']:
                         break
                     if self.use_cuda:
                         sents, targets, bert_sents, doc_lengths = self.move_to_cuda(sents, targets, bert_sents, doc_lengths)
@@ -221,21 +199,21 @@ def custom_collate(batch) -> Tuple[torch.Tensor, torch.LongTensor, torch.Tensor,
     Follows original implementation.
     https://pytorch.org/docs/stable/data.html#dataloader-collate-fn
     """
-    all_sents = []
-    batched_targets = np.array([])
     all_bert = []
+    all_data = []
+    all_targets = np.array([])
     doc_lengths = torch.LongTensor([])
     for data, targets, bert in batch:
         for i in range(data.shape[0]):
-            all_sents.append(data[i][data[i].sum(dim=1) != 0]) # remove padding
-        batched_targets = np.concatenate((batched_targets, targets))
+            all_data.append(data[i][data[i].sum(dim=1) != 0]) # remove padding
+        all_targets = np.concatenate((all_targets, targets))
         all_bert.append(bert)
         doc_lengths = torch.cat((doc_lengths, torch.LongTensor([len(targets)])))
 
-    packed_sents = pack_sequence(all_sents, enforce_sorted=False)
-    if batched_targets.dtype == float:
-        batched_targets = torch.from_numpy(batched_targets).long()
-    return packed_sents, batched_targets, torch.cat(all_bert), doc_lengths
+    all_data = pack_sequence(all_data, enforce_sorted=False)
+    if all_targets.dtype == float:
+        all_targets = torch.from_numpy(all_targets).long()
+    return torch.cat(all_bert), all_data, all_targets, doc_lengths
 
 class TS_Dataset2(TS_Dataset):
 
@@ -316,22 +294,190 @@ class TS_Dataset2(TS_Dataset):
         return data, raw_text, bert_data[bert_mask, :]
 
 
-def _bert_embed(self, sentences: Union[str, List[str], np.ndarray], batch_size=4) -> torch.FloatTensor:
-    """
-    Returns the BERT embedding(s) of a sentence/list of sentences.
-    This follows the same procedure as the bert-as-service module (which was originally used).
-    """
-    if isinstance(sentences, str):
-        sentences = [sentences]
-    elif isinstance(sentences, np.ndarray):
-        sentences = sentences.tolist()
-    bert_sents = []
-    for i in range(0, len(sentences), batch_size):
-        batch = sentences[i:min(i+batch_size, len(sentences))]
-        tokenized = TS_Dataset2.bert_tokenizer(batch, padding=True, truncation=True, max_length=TS_Dataset2.MAX_SECTION_LEN, return_tensors='pt').to(device)
-        # Hidden layers have a shape of (batch_size, max_seq_len, 768) - only the second-to-last layer is used.
-        output_layer = TS_Dataset2.bert_model(**tokenized, output_hidden_states=True).hidden_states[-2]
-        avg_pool = torch.nn.AvgPool2d(kernel_size=(output_layer.shape[1], 1)) # Take the average of the layer on the time (sequence) axis.
-        bert_sents.append(avg_pool(output_layer).squeeze(dim=1).detach())
+class Textseg2Pipeline(TS_Pipeline):
+    def __init__(self, word2vec: Optional[KeyedVectors] = None, *args, **kwargs) -> None:
+        self.word2vec = word2vec
+        super().__init__(*args, **kwargs)
 
-    return torch.cat(bert_sents).cpu() # shape = (len(sentences), 768)
+    def _sanitize_parameters(self, from_wiki=False, max_sent_len=30, max_sec_len = 70, labeled = True) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        preprocess_params, forward_params = {}, {}
+        preprocess_params["from_wiki"] = from_wiki
+        preprocess_params["max_sent_len"] = max_sent_len
+        preprocess_params["max_sec_len"] = max_sec_len
+        preprocess_params["labeled"] = labeled
+        return preprocess_params, forward_params
+
+    def preprocess(self, path: str, from_wiki: bool, max_sent_len: int, max_sec_len: int, labeled: bool) -> Tuple[Dict[str, torch.TensorType], torch.FloatTensor, np.ndarray]:
+        with open(path, 'r') as f:
+            text = f.read()
+        if labeled:
+            return self.get_data_targets(text, from_wiki, max_sent_len, max_sec_len)
+        else:
+            return self.get_data_raw(text, from_wiki, max_sent_len)
+
+    def get_data_targets(self, text:str, from_wiki: bool, max_sent_len: int, max_sec_len: int) -> Tuple[torch.FloatTensor, torch.FloatTensor, np.ndarray]:
+        data = []
+        raw_text = []
+        targets = np.array([], dtype=int)
+
+        sections = sectioned_clean_text(text, from_wiki=from_wiki)
+        suitable_sections_count = 0
+        for section in sections:
+            sentences = sent_tokenize_plus(section)
+            if not (max_sec_len > len(sentences) > 1): # Filter too short or too long sections.
+                if len(sections) <= 2: # Skip docs that end up with just a single section
+                    break
+                continue
+            
+            section_sentences = []
+            for sentence in sentences:
+                sentence_words = word_tokenize(sentence)
+                if len(sentence_words) > 0:
+                    sentence_emb = self.embed_words(sentence_words)
+                    if len(sentence_emb) > 0:
+                        section_sentences.append(sentence)
+                        data.append(sentence_emb)
+                        continue
+                    
+            if len(section_sentences) > 0:
+                raw_text += section_sentences
+                sentence_labels = np.zeros(len(section_sentences), dtype=int)
+                sentence_labels[-1] = 1 # Last sentence ends a section --> 1.
+                targets = np.append(targets, sentence_labels)
+                suitable_sections_count += 1
+
+        # Get a random document if the current one is empty or has less than two suitable sections.
+        if len(data) == 0 or suitable_sections_count < 2:
+            return None
+
+        model_inputs = self.tokenizer(
+            text=raw_text,
+            padding=True,
+            truncation=True,
+            max_length=max_sent_len,
+            return_tensors='pt'
+        )
+        data = pad_sequence(data, batch_first=True) # (num_sents, max_sent_len, embed_dim)
+        return model_inputs, data, targets
+
+    def get_data_raw(self, text:str, from_wiki: bool, max_sent_len: int) -> Tuple[torch.FloatTensor, torch.FloatTensor, np.ndarray]:
+        data = []
+        raw_text = np.array([])
+        text = clean_text(text, from_wiki=from_wiki)
+        sentences = sent_tokenize_plus(text)
+        for sentence in sentences:
+            sentence_words = word_tokenize(sentence)
+            if len(sentence_words) > 0:
+                sentence_emb = self.embed_words(sentence_words)
+                if len(sentence_emb) > 0:
+                    data.append(sentence_emb)
+                    raw_text = np.append(raw_text, sentence)
+
+        if len(data) == 0:
+            return None
+        
+        model_inputs = self.tokenizer(
+            text=raw_text,
+            padding=True,
+            truncation=True,
+            max_length=max_sent_len,
+            return_tensors='pt'
+        )
+        data = pad_sequence(data, batch_first=True) # (num_sents, max_sent_len, embed_dim)
+        return model_inputs, data, raw_text
+
+    def embed_words(self, words: List[str]) -> torch.FloatTensor:
+        res = []
+        for word in words:
+            if self.word2vec:
+                if word in self.word2vec:
+                    res.append(self.word2vec[word])
+                else:
+                    # return TS_Dataset.word2vec['UNK']
+                    continue # skip words not in the word2vec model
+            else:
+                res.append(rng.standard_normal(size=300))
+        return torch.FloatTensor(np.stack(res)) if res else []
+
+    def _forward(self, input_tensors: Dict[str, torch.TensorType]) -> torch.TensorType:
+        output_layer = self.model(**input_tensors, output_hidden_states=True).hidden_states[-2]
+        avg_pool = torch.nn.AvgPool2d(kernel_size=(output_layer.shape[1], 1)) # Take the average of the layer on the time (sequence) axis.
+        return avg_pool(output_layer).squeeze(dim=1).detach()
+
+    @staticmethod
+    def no_collate_fn(item):
+        item = item[0]
+        model_input, data, targets = item
+        if targets.dtype == np.int64:
+            targets = torch.from_numpy(targets)
+        return model_input, data, targets, torch.LongTensor([len(targets)])
+        
+    @staticmethod
+    def cat_collate_fn(tokenizer) -> Callable:
+        """Returns the cat_collate function2."""
+        t_padding_value = tokenizer.pad_token_id
+
+        def cat_collate(items) -> Tuple[torch.TensorType, torch.TensorType, torch.TensorType]:
+            """Concatenates all items together and addiotnally returns the length of the individual items."""
+            all_model_inputs = {'input_ids': [], 'attention_mask': [], 'token_type_ids': []}
+            all_data = []
+            all_targets = np.array([])
+            doc_lengths = torch.LongTensor([])
+            max_length = max(item[0]['input_ids'].shape[1] for item in items)
+            for model_input, data, targets in items:
+                all_targets = np.concatenate((all_targets, targets), axis=0)
+                for i in range(data.shape[0]):
+                    all_data.append(data[i][data[i].sum(dim=1) != 0]) # remove padding
+                doc_lengths = torch.cat((doc_lengths, torch.LongTensor([len(targets)])), dim=0)
+                
+                for key, value in model_input.items():
+                    if key == 'input_ids':
+                        if value.shape[1] < max_length:
+                            value = torch.cat((value, torch.zeros(value.shape[0], max_length - value.shape[1], dtype=int) + t_padding_value), dim=1)
+                    else: # key == 'attention_mask' or key == 'token_type_ids'
+                        if value.shape[1] < max_length:
+                            value = torch.cat((value, torch.zeros(value.shape[0], max_length - value.shape[1], dtype=int)), dim=1)
+                    all_model_inputs[key].append(value)
+
+            all_data = pack_sequence(all_data, enforce_sorted=False)
+            for key, value in all_model_inputs.items():
+                all_model_inputs[key] = torch.cat(value, dim=0)
+            if all_targets.dtype == float:
+                all_targets = torch.from_numpy(all_targets).long()
+            return BatchEncoding(all_model_inputs), all_data, all_targets, doc_lengths
+            
+        return cat_collate
+
+def main(args):
+    ts = TextSeg2(
+        bert_name=args.bert_name,
+        language=args.lang,
+        dataset_path=args.data_dir,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        use_cuda= not args.disable_cuda,
+        load_from=args.load_from,
+        subset=args.subset,
+    )
+    if args.test:
+        ts.run_test()
+    else:
+        res = ts.run(args.epochs, args.resume)
+    print(f'Best Pk = {res[0]} --- Best windowdiff = {res[1]}')
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Train/Test a Text Segmentation model.")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--test", action="store_true", help="Test mode.")
+    mode.add_argument("--resume", action="store_true", help="Resume training from a checkpoint.")
+    parser.add_argument("--bert_name", type=str, help="Name of the BERT model to use (if not using pre-embedded texts).")
+    parser.add_argument("--lang", type=str, default="en", help="Language to use.")
+    parser.add_argument("--data_dir", type=str, help="Path to the dataset directory.")
+    parser.add_argument("--subset", type=int, help="Use only a subset of the dataset.")
+    parser.add_argument("--disable_cuda", action="store_true", help="Disable cuda (if available).")
+    parser.add_argument('--batch_size', help='Batch size', type=int, default=2)
+    parser.add_argument('--epochs', help='Number of epochs to run', type=int, default=10)
+    parser.add_argument('--load_from', help='Where to load an existing model from', type=str, default=None)
+    parser.add_argument('--num_workers', help='How many workers to use for data loading', type=int, default=16)
+
+    main(parser.parse_args())

@@ -36,9 +36,7 @@ class SentenceEncodingRNN(nn.Module):
 
 
 class TS_Model(nn.Module):
-    """
-    Model for Text Segmentation.
-    """
+    """Model for Text Segmentation."""
     criterion = nn.CrossEntropyLoss()
 
     def __init__(self, sentence_encoder: SentenceEncodingRNN, hidden=128, num_layers=2):

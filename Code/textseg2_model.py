@@ -40,9 +40,7 @@ class SentenceEncodingRNN2(nn.Module):
 
 
 class TS_Model2(nn.Module):
-    """
-    Model for Text Segmentation.
-    """
+    """Model for Text Segmentation."""
     def __init__(self, sentence_encoder: SentenceEncodingRNN2, hidden=128, num_layers=2):
         super().__init__()
         self.sentence_encoder = sentence_encoder

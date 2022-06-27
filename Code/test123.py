@@ -15,8 +15,8 @@ if __name__ == '__main__':
     # sample = rng.choice(paths, size=4, replace=False)
     # res = l.segment_text(sample)
 
-    # k = TextSeg2(language='en', dataset_path="text_segmentation/Datasets/ENWiki/data_subset", num_workers=2, subset=1000, batch_size=2)
-    # res = k.run(1)
+    k = TextSeg2(load_from='checkpoints/textseg2/ENWiki_Jun26_1851/epoch_1', bert_name='bert-base-uncased', language='en', dataset_path="text_segmentation/Datasets/ENWiki/data_subset", num_workers=2, subset=1000, batch_size=2)
+    res = k.run(3, resume=True)
 
     # text_segmentation/Datasets/NLWiki/data/213000-213999/wiki_213555
 
@@ -25,12 +25,12 @@ if __name__ == '__main__':
     # model_path = "checkpoints/textseg/NLNews_15-06_18-50/best_model"
     # ts = TextSeg(language='nl', load_from=model_path)
     # res = ts.segment_text(sample)
-    # print(res)
+    print(res)
 
-    with open('text_segmentation/Datasets/NLWiki/data/213000-213999/wiki_213555', 'r') as f:
-        text = f.read()
-    t1 = clean_text(text, from_wiki=True)
-    print(len(sent_tokenize(t1)))
+    # with open('text_segmentation/Datasets/NLWiki/data/213000-213999/wiki_213555', 'r') as f:
+    #     text = f.read()
+    # t1 = clean_text(text, from_wiki=True)
+    # print(len(sent_tokenize(t1)))
 
-    t2 = sectioned_clean_text(text, from_wiki=True)
-    print(sum([len(sent_tokenize(t)) for t in t2]))
+    # t2 = sectioned_clean_text(text, from_wiki=True)
+    # print(sum([len(sent_tokenize(t)) for t in t2]))

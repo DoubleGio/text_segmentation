@@ -1,5 +1,4 @@
 import os, argparse, torch
-import multiprocess as mp
 from transformers import logging as tlogging
 from transformers import BertTokenizer, BertModel, FeatureExtractionPipeline
 from tqdm import tqdm
@@ -13,7 +12,7 @@ This follows the same procedure as the bert-as-service module (which was origina
 tlogging.set_verbosity_error()
 datasets = [ENWIKI_LOC, NLWIKI_LOC, NLNEWS_LOC, NLAUVI_LOC_N, NLAUVI_LOC_C]
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-MAX_SENT_LENGTH = 25 # See dataset analysis notebook; sentences generally don't contain more than 25 words.
+MAX_SENT_LENGTH = 30 # See dataset analysis notebook; sentences generally don't contain more than 25 words.
 PIPE = None
 
 class CustomPipeline(FeatureExtractionPipeline):
@@ -61,18 +60,6 @@ def reset_pipe():
     global PIPE
     PIPE = None
 
-def writer(q: mp.Queue):
-    print(f'Starting {mp.current_process().name}')
-    while True:
-        bert_emb, doc_path = q.get()
-        if bert_emb is None:
-            break
-        new_loc = doc_path.replace('data', 'data_bert') + '.pt'
-        new_folder = new_loc.rsplit('/', 1)[0]
-        if not os.path.exists(new_folder):
-            os.makedirs(new_folder, exist_ok=True)
-        torch.save(bert_emb, new_loc)
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Turn a folder with texts into BERT embeddings.')
     parser.add_argument('--data_dir', type=str, default='text_segmentation/Datasets/ENWiki/data_subset')
@@ -84,14 +71,14 @@ if __name__ == "__main__":
     total_files = len(get_all_file_names(args.data_dir))
     file_gen = yield_all_file_names(args.data_dir)
     p = get_pipe(lang=args.lang)
-    write_q = mp.Queue()
-    writers = [mp.Process(name=f'writer_{i}', target=writer, args=(write_q,)) for i in range(2)]
-    for w in writers: w.start()
+
     with tqdm(desc='Docs processed', total=total_files) as pbar:
         for bert_emb, doc_path in p(file_gen, num_workers=args.num_processes, batch_size=1, from_wiki=args.wiki):
-            write_q.put((bert_emb, doc_path))
+            new_loc = doc_path.replace('data', 'data_bert') + '.pt'
+            new_folder = new_loc.rsplit('/', 1)[0]
+            if not os.path.exists(new_folder):
+                os.makedirs(new_folder, exist_ok=True)
+            torch.save(bert_emb, new_loc)
             pbar.update()
-    for w in writers: write_q.put((None, None))
-    for w in writers: w.join()
 
     print(f"DONE! Processed {total_files} files.")

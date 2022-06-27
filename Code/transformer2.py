@@ -1,36 +1,51 @@
-import logging, os, argparse, gc
-from textseg_model import create_model
-import gensim.downloader as gensim_api
-from gensim.models import KeyedVectors
-from sklearn.model_selection import train_test_split
-import torch
-import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
-from torch.utils.tensorboard import SummaryWriter
-from typing import Callable, Generator, List, Optional, Tuple, Type
-from TS_Dataset import TS_Dataset, custom_collate
-from tqdm import tqdm
-from datetime import datetime, timedelta
+"""
+[pdf](https://arxiv.org/pdf/2110.07160.pdf)
+Transformer² model (without S_single & L_topic):
+    1. Obtain the sentence embeddings (using pretrained BERT).
+        >>> sentence1 = 'sentence one'; sentence2 = 'yet another one'
+        1.1. Pairwise tokenize (skip last sentence I guess?): 
+            >>> tokens = tokenizer(text=sentence1, textpair=sentence2, padding=True, return_tensors='pt')
+            >>> ['[CLS]', 'sentence', 'one', '[SEP]', 'yet', 'another', 'one', '[SEP]']
+        1.2. Get sentence embedding from CLS token:
+            >>> out = model(**tokens)
+            >>> out.last_hidden_state[:, 0, :] # (sentences, tokens, hidden_size)
+    2. Train a transformer model to classify whether each sentence is a segment boundary.
+        2.1. Create a transformer model:
+            >>> y_seg = Sigmoid(Linear2(TransformerΘ(S)))
+            >>> Θ = {'nhead': 24, 'num_encoder_layers': 5, 'dim_feedforward': 1024}
+        2.2. Create a loss function:
+            >>> loss_fn = binary cross entropy loss
+        'For the segmentation predictions, 70% of the inner sentences were randomly masked,
+        while all the begin sentences were not masked in order to address the imbalance class problem.'
+        basically, remove 70% of the non-boundary sentences for training.
+"""
+import os, logging, torch, gc
 import numpy as np
-rng = np.random.default_rng()
-from utils import get_all_file_names, clean_text, sectioned_clean_text, compute_metrics, LoggingHandler, word_tokenize
+from datetime import datetime, timedelta
+from torch.utils.data import Dataset, IterableDataset, DataLoader
+from torch.utils.tensorboard import SummaryWriter
+from typing import Dict, List, Optional, Tuple, Any, Callable, Generator
+from sklearn.model_selection import train_test_split
+from tqdm import tqdm
+from transformers import BertTokenizerFast, BertModel
+from transformers import logging as tlogging
+from TS_Pipeline import TS_Pipeline
+from transformers2_model import create_model
+from utils import get_all_file_names, sectioned_clean_text, sent_tokenize_plus, LoggingHandler
 
-W2V_NL_PATH = 'text_segmentation/Datasets/word2vec-nl-combined-160.txt' # Taken from https://github.com/clips/dutchembeddings
 EARLY_STOP = 4
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 logger.addHandler(LoggingHandler(use_tqdm=True))
+tlogging.set_verbosity_error()
 
-class TextSeg:
-    """
-    Updated implementation of https://github.com/koomri/text-segmentation.
-    """
+class Transformer2:
 
     def __init__(
         self,
         language: Optional[str] = None,
-        word2vec_path: Optional[str] = None,
+        bert_name: Optional[str] = None,
         dataset_path: Optional[str] = None,
         from_wiki: Optional[bool] = None,
         splits = [0.8, 0.1, 0.1],
@@ -38,102 +53,53 @@ class TextSeg:
         num_workers = 0,
         use_cuda = True,
         load_from: Optional[str] = None,
-        subset = np.inf,
+        subset: Optional[int] = None,
     ) -> None:
-        if language:
-            if language == 'en':
-                word2vec_path = gensim_api.load('word2vec-google-news-300', return_path=True)
-                word2vec = KeyedVectors.load_word2vec_format(word2vec_path, binary=True, limit=100_000)
+        if bert_name:
+            bert_tokenizer = BertTokenizerFast.from_pretrained(bert_name)
+            bert_model = BertModel.from_pretrained(bert_name)
+        elif language:
+            if language == 'en' or language == 'test':
+                bert_tokenizer = BertTokenizerFast.from_pretrained('bert-base-uncased')
+                bert_model = BertModel.from_pretrained('bert-base-uncased')
             elif language == 'nl':
-                word2vec = KeyedVectors.load_word2vec_format(W2V_NL_PATH, limit=100_000)
-            elif language == 'test':
-                word2vec = None
+                bert_tokenizer = BertTokenizerFast.from_pretrained('GroNLP/bert-base-dutch-cased')
+                bert_model = BertModel.from_pretrained('GroNLP/bert-base-dutch-cased')
             else:
-                raise ValueError(f"Language {language} not supported, try 'en' or 'nl' instead.")
-        elif word2vec_path:
-            for is_binary in [True, False]:
-                try:
-                    word2vec = KeyedVectors.load_word2vec_format(word2vec_path, binary=is_binary, limit=100_000)
-                    break
-                except FileNotFoundError:
-                    raise FileNotFoundError(f"Could not find word2vec file at {word2vec_path}.")
-                except UnicodeDecodeError:
-                    continue
-            if not word2vec:
-                raise Exception(f"Invalid encoding, could not load word2vec file from {word2vec_path}.")
-        else:
-            raise ValueError("Either a word2vec path or a language must be specified.")
-        # TS_Dataset.word2vec = word2vec
-        self.vec_size = word2vec.vector_size if word2vec else 300
+                raise ValueError(f"Language {language} not supported.")
 
-        if num_workers > 0:
-            if torch.multiprocessing.get_start_method() == 'spawn':
-                # Multiprocessing only works on Unix systems which support the fork() system call.
-                logger.warning("Can't use num_workers > 0 with spawn start method, setting num_workers to 0.")
-                num_workers = 0
         if not use_cuda:
-            global device
-            device = torch.device("cpu")
+            global device 
+            device = torch.device('cpu')
             logger.info(f"Using device: {device}.")
             self.use_cuda = False
         else:
             device_name = torch.cuda.get_device_name(device)
             logger.info(f"Using device: {device_name}.")
             self.use_cuda = False if device_name == 'cpu' else True
-
+        
         if dataset_path:
+            self.subsets = {'train': int(subset * splits[0]), 'val': int(subset * splits[1]), 'test': int(subset * splits[2])} if subset else None
             if from_wiki is None:
                 from_wiki = "wiki" in dataset_path.lower()
-            self.load_data(
-                dataset_path=dataset_path,
-                from_wiki=from_wiki,
-                splits=splits,
-                batch_size=batch_size,
-                num_workers=num_workers,
-                word2vec=word2vec,
-                subset=subset
-            )
+            self.load_data(dataset_path, from_wiki, splits, batch_size, num_workers, bert_tokenizer, bert_model)
         self.load_from = load_from
         self.current_epoch = 0
 
-    def load_data(
-        self,
-        dataset_path: str,
-        from_wiki: bool,
-        splits: List[float],
-        batch_size: int,
-        num_workers: int,
-        dataset_class: Type[Dataset] = TS_Dataset,
-        collate_fn: Callable = custom_collate,
-        word2vec: Optional[KeyedVectors] = None,
-        subset = np.inf,
-    ) -> None:
-        """
-        Load the right data and pretrained models.
-        """
-        dataset_class.word2vec = word2vec
+    def load_data(self, dataset_path, from_wiki, splits, batch_size, num_workers, bert_tokenizer, bert_model):
         self.dataset_name = dataset_path.split('/')[-2]
         path_list = get_all_file_names(dataset_path)
 
         # Split and shuffle the data
         train_paths, test_paths = train_test_split(path_list, test_size=1-splits[0])
         val_paths, test_paths = train_test_split(test_paths, test_size=splits[1]/(splits[1]+splits[2]))
-        
-        train_dataset = dataset_class(np.array(train_paths), from_wiki)
-        val_dataset = dataset_class(np.array(val_paths), from_wiki)
-        test_dataset = dataset_class(np.array(test_paths), from_wiki)
 
-        self.train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate_fn, num_workers=num_workers, pin_memory=self.use_cuda)
-        self.val_loader = DataLoader(val_dataset, batch_size=batch_size, collate_fn=collate_fn, num_workers=num_workers, pin_memory=self.use_cuda)
-        self.test_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=collate_fn, num_workers=num_workers, pin_memory=self.use_cuda)
-        logger.info(f"Loaded {len(train_dataset)} training examples, {len(val_dataset)} validation examples, and {len(test_dataset)} test examples.")
-        if subset < len(path_list):
-            self.sizes = {'train': int(subset * splits[0]), 'val': int(subset * splits[1]), 'test': int(subset * splits[2])}
-            logger.info(f"Subsets: train {self.sizes['train']}, validate {self.sizes['val']}, test {self.sizes['test']}")
-        else:
-            self.sizes = {'train': len(train_dataset), 'val': len(val_dataset), 'test': len(test_dataset)}
+        pipe = Transformer2Pipeline(bert_tokenizer, bert_model, device, batch_size, num_workers, from_wiki=from_wiki)
+        self.train_loader = pipe(train_paths)
+        self.val_loader = pipe(val_paths)
+        self.test_loader = pipe(test_paths)
 
-    def initialize_run(self, resume=False, model_creator: Callable = create_model):
+    def initialize_run(self, resume=False):
         cname = self.__class__.__name__.lower()
         if resume:
             if self.load_from is None:
@@ -144,7 +110,7 @@ class TextSeg:
             writer = SummaryWriter(log_dir=f'runs/{cname}/{self.dataset_name}_{now}')
             checkpoint_path = os.path.join(f'checkpoints/{cname}/{self.dataset_name}_{now}')
             
-            model = model_creator(input_size=self.vec_size, set_device=device)
+            model = create_model(input_size=self.vec_size, set_device=device)
             model.load_state_dict(state['state_dict'])
             logger.info(f"Loaded model from {self.load_from}.")
 
@@ -160,17 +126,14 @@ class TextSeg:
             checkpoint_path = os.path.join(f'checkpoints/{cname}/{self.dataset_name}_{now}')
             os.makedirs(checkpoint_path, exist_ok=True)
 
-            model = model_creator(input_size=self.vec_size, set_device=device)
+            model = create_model(input_size=self.vec_size, set_device=device)
             optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
             best_val_scores = [np.inf, np.inf] # (pk, windowdiff)
             non_improvement_count = 0
         return now, writer, checkpoint_path, model, optimizer, best_val_scores, non_improvement_count
 
-    def run(self, epochs=10, resume=False) -> Tuple[float, float]:
-        """
-        Start/Resume training.
-        """
+    def run(self, epochs=10, resume=False):
         now, writer, checkpoint_path, model, optimizer, best_val_scores, non_improvement_count = self.initialize_run(resume)
         with tqdm(desc='Epochs', total=epochs, initial=self.current_epoch) as pbar:
             for epoch in range(self.current_epoch, epochs):
@@ -191,6 +154,7 @@ class TextSeg:
                 torch.save(state, os.path.join(checkpoint_path, f'epoch_{epoch}'))
                 gc.collect()
                 val_pk, val_wd, threshold = self.validate(model, writer)
+                gc.collect()
                 if sum([val_pk, val_wd]) < sum(best_val_scores):
                     non_improvement_count = 0
                     test_scores = self.test(model, threshold, writer)
@@ -213,82 +177,19 @@ class TextSeg:
             logger.info(f"Total time elapsed: {str(timedelta(seconds=int(pbar.format_dict['elapsed'])))}")
         writer.close()
         return best_val_scores
-    
-    def run_test(self, threshold: Optional[float] = None) -> Tuple[float, float]:
-        if self.load_from is None:
-            raise ValueError("Can't test without a load_from path.")
-        state = torch.load(self.load_from)
-        model = create_model(input_size=self.vec_size, set_device=device)
-        model.load_state_dict(state['state_dict'])
-        logger.info(f"Loaded model from {self.load_from}.")
-        return self.test(model, threshold if threshold else state['threshold'])
-
-    def segment_text(self, texts: List[str], threshold: Optional[float] = None, from_wiki=False) -> List[str]:
-        """
-        Load a model and segment text(s).
-        """
-        if self.load_from is None:
-            raise ValueError("Can't segment without a load_from path.")
-        state = torch.load(self.load_from)
-        model = create_model(input_size=self.vec_size, set_device=device)
-        model.load_state_dict(state['state_dict'])
-        model.eval()
-        logger.info(f"Loaded model from {self.load_from}.")
-        if threshold is None:
-            threshold = state['threshold']
-        logger.info(f"Using threshold {threshold:.2}.")
-        del state
-
-        text_data = TS_Dataset(np.array(texts), from_wiki, labeled=False)
-        text_loader = DataLoader(text_data, batch_size=4, collate_fn=custom_collate, num_workers=0, pin_memory=self.use_cuda)
-        logger.info(f"Loaded {len(text_data)} texts.")
-        del texts
-
-        segmented_texts = []
-        with tqdm(desc='Segmenting', total=len(text_loader.dataset)) as pbar:
-            with torch.no_grad():
-                for sents, texts, doc_lengths in text_loader:
-                    if sents is None:
-                        pbar.update(text_loader.batch_size)
-                        continue
-
-                    if self.use_cuda:
-                        sents = sents.to(device, non_blocking=True)
-                        doc_lengths = doc_lengths.to(device, non_blocking=True)
-                    output = model(sents)
-                    del sents
-                    output_softmax = F.softmax(output, dim=1)
-                    output_softmax = output_softmax.cpu().detach().numpy()
-                    predictions = (output_softmax[:, 1] > threshold).astype(int)
-                    del output_softmax, output
-
-                    doc_start_idx = 0
-                    for doc_len in doc_lengths:
-                        segmented_text = '======\n'
-                        for i, sent in enumerate(texts[doc_start_idx:doc_start_idx+doc_len]):
-                            segmented_text += sent
-                            if predictions[i] == 1:
-                                segmented_text += '\n======\n'
-                        doc_start_idx += doc_len
-                        segmented_texts.append(segmented_text)
-                        pbar.update(len(texts))
-                    torch.cuda.empty_cache()
-
-        return segmented_texts
 
     def train(self, model, optimizer, writer) -> None:
         model.train()
         total_loss = torch.tensor(0.0, device=device)
         with tqdm(desc=f'Training #{self.current_epoch}', total=self.sizes['train'], leave=False) as pbar:
-            for sents, targets, doc_lengths in self.train_loader:
+            for sent_embeddings, targets, doc_lengths in self.train_loader:
                 if pbar.n > self.sizes['train']:
                     break
                 if self.use_cuda:
-                    sents, targets, doc_lengths = self.move_to_cuda(sents, targets, doc_lengths)
+                    sent_embeddings, targets, doc_lengths = self.move_to_cuda(sent_embeddings, targets, doc_lengths)
                 model.zero_grad()
-                output = model(sents)
-                del sents
-                output, targets, doc_lengths = self.remove_last(output, targets, doc_lengths)
+                output = model(sent_embeddings, targets)
+                # del sents, bert_sents
 
                 loss = model.criterion(output, targets)
                 loss.backward()
@@ -385,55 +286,49 @@ class TextSeg:
             writer.add_scalar('pk_score/test', epoch_pk, self.current_epoch)
             writer.add_scalar('wd_score/test', epoch_wd, self.current_epoch)
         return epoch_pk, epoch_wd
-
-    def remove_last(self, x: torch.Tensor, y: torch.LongTensor, lengths: torch.LongTensor) -> Tuple[torch.Tensor, torch.LongTensor, torch.LongTensor]:
-        """For each document in the batch, remove the last sentence prediction/label (as it's unnecessary)."""
-        x_adj = torch.tensor([], device=device)
-        y_adj = torch.tensor([], dtype=torch.int, device=device)
-        first_sent_i = 0
-        for i in range(lengths.size(0)):
-            final_sent_i = first_sent_i + lengths[i]
-            x_adj = torch.cat((x_adj, x[first_sent_i:final_sent_i-1, :]), dim=0)
-            y_adj = torch.cat((y_adj, y[first_sent_i:final_sent_i-1]), dim=0)
-            first_sent_i = final_sent_i
-            lengths[i] -= 1
-        
-        return x_adj, y_adj, lengths
-
+            
+    
     @staticmethod
     def move_to_cuda(*tensors: torch.TensorType) -> Generator[torch.TensorType, None, None]:
         """Moves all given tensors to device."""
         for t in tensors:
             yield t.to(device, non_blocking=True)
 
-def main(args):
-    ts = TextSeg(
-        language=args.lang,
-        dataset_path=args.data_dir,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        use_cuda= not args.disable_cuda,
-        load_from=args.load_from,
-        subset=args.subset,
-    )
-    if args.test:
-        ts.run_test()
-    else:
-        res = ts.run(args.epochs, args.resume)
-    print(f'Best Pk = {res[0]} --- Best windowdiff = {res[1]}')
+class Transformer2Pipeline(TS_Pipeline):
+
+    def _sanitize_parameters(self, from_wiki=False, max_sent_len=30) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        preprocess_params, forward_params = {}, {}
+        preprocess_params["from_wiki"] = from_wiki
+        preprocess_params["max_sent_len"] = max_sent_len
+        return preprocess_params, forward_params
+
+    def preprocess(self, path: str, from_wiki: bool, max_sent_len: int) -> Tuple[Dict[str, torch.TensorType], np.ndarray]:
+        with open(path, 'r') as f:
+            text = f.read()
+        sections = sectioned_clean_text(text, from_wiki=from_wiki)
+        sentences = []
+        targets = np.array([], dtype=int)
+        for section in sections:
+            s = sent_tokenize_plus(section)
+            sentences += s
+            section_targets = np.zeros(len(s), dtype=int)
+            section_targets[0] = 1
+            targets = np.append(targets, section_targets)
+        # Pairwise tokenizing (last sentence is skipped)
+        model_inputs = self.tokenizer(
+            text=sentences[:-1], 
+            text_pair=sentences[1:], 
+            padding=True, 
+            truncation=True, 
+            max_length=max_sent_len * 2, # *2 because of pairwise
+            return_tensors='pt'
+        )
+        return model_inputs, targets[:-1]
+
+    def _forward(self, input_tensors: Dict[str, torch.TensorType]) -> torch.TensorType:
+        """Returns the [CLS] token."""
+        return self.model(**input_tensors).last_hidden_state[:, 0, :] # (sentences, hidden_size)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train/Test a Text Segmentation model.")
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--test", action="store_true", help="Test mode.")
-    mode.add_argument("--resume", action="store_true", help="Resume training from a checkpoint.")
-    parser.add_argument("--lang", type=str, default="en", help="Language to use.")
-    parser.add_argument("--data_dir", type=str, help="Path to the dataset directory.")
-    parser.add_argument("--subset", type=int, help="Use only a subset of the dataset.")
-    parser.add_argument("--disable_cuda", action="store_true", help="Disable cuda (if available).")
-    parser.add_argument('--batch_size', help='Batch size', type=int, default=2)
-    parser.add_argument('--epochs', help='Number of epochs to run', type=int)
-    parser.add_argument('--load_from', help='Where to load an existing model from', type=str)
-    parser.add_argument('--num_workers', help='How many workers to use for data loading', type=int, default=16)
-
-    main(parser.parse_args())
+    t = Transformer2(language='en', batch_size=3, dataset_path='text_segmentation/Datasets/ENWiki/data_subset', from_wiki=True)
+    t.run()

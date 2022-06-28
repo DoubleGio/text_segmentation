@@ -1,5 +1,5 @@
 import logging, os, argparse, gc
-from textseg_model import create_model
+from models import create_TS_model
 import gensim.downloader as gensim_api
 from gensim.models import KeyedVectors
 from sklearn.model_selection import train_test_split
@@ -133,7 +133,7 @@ class TextSeg:
         else:
             self.sizes = {'train': len(train_dataset), 'val': len(val_dataset), 'test': len(test_dataset)}
 
-    def initialize_run(self, resume=False, model_creator: Callable = create_model):
+    def initialize_run(self, resume=False, model_creator: Callable = create_TS_model):
         cname = self.__class__.__name__.lower()
         if resume:
             if self.load_from is None:
@@ -218,7 +218,7 @@ class TextSeg:
         if self.load_from is None:
             raise ValueError("Can't test without a load_from path.")
         state = torch.load(self.load_from)
-        model = create_model(input_size=self.vec_size, set_device=device)
+        model = create_TS_model(input_size=self.vec_size, set_device=device)
         model.load_state_dict(state['state_dict'])
         logger.info(f"Loaded model from {self.load_from}.")
         return self.test(model, threshold if threshold else state['threshold'])
@@ -230,7 +230,7 @@ class TextSeg:
         if self.load_from is None:
             raise ValueError("Can't segment without a load_from path.")
         state = torch.load(self.load_from)
-        model = create_model(input_size=self.vec_size, set_device=device)
+        model = create_TS_model(input_size=self.vec_size, set_device=device)
         model.load_state_dict(state['state_dict'])
         model.eval()
         logger.info(f"Loaded model from {self.load_from}.")

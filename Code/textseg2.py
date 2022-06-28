@@ -1,5 +1,5 @@
 import logging, argparse
-from textseg2_model import create_model2, supervised_cross_entropy
+from models import create_TS2_model, supervised_cross_entropy
 from textseg import TextSeg
 from TS_Dataset import TS_Dataset
 from TS_Pipeline import TS_Pipeline
@@ -78,7 +78,7 @@ class TextSeg2(TextSeg):
         super().load_data(**kwargs, dataset_class=TS_Dataset2, collate_fn=custom_collate)
 
     # Override
-    def initialize_run(self, resume=False, model_creator: Callable = create_model2):
+    def initialize_run(self, resume=False, model_creator: Callable = create_TS2_model):
         return super().initialize_run(resume, model_creator)
 
     # Override
@@ -232,7 +232,7 @@ class TS_Dataset2(TS_Dataset):
         suitable_sections_count = 0
         for section in sections:
             sentences = sent_tokenize_plus(section)
-            if not (TS_Dataset.MAX_SECTION_LEN > len(sentences) > 1): # Filter too short or too long sections.
+            if not (self.MAX_SECTION_LEN > len(sentences) > 1): # Filter too short or too long sections.
                 if len(sections) <= 2: # Skip docs that end up with just a single section
                     break
                 bert_mask = np.append(bert_mask, np.zeros(len(sentences), dtype=bool))

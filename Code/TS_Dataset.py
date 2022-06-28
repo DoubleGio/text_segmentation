@@ -58,7 +58,7 @@ class TS_Dataset(Dataset):
         suitable_sections_count = 0
         for section in sections:
             sentences = sent_tokenize_plus(section)
-            if not (TS_Dataset.MAX_SECTION_LEN > len(sentences) > 1): # Filter too short or too long sections.
+            if not (self.MAX_SECTION_LEN > len(sentences) > 1): # Filter too short or too long sections.
                 if len(sections) <= 2: # Skip docs that end up with just a single section
                     break
                 continue
@@ -120,9 +120,9 @@ class TS_Dataset(Dataset):
     def embed_words(self, words: List[str]) -> torch.FloatTensor:
         res = []
         for word in words:
-            if TS_Dataset.word2vec:
-                if word in TS_Dataset.word2vec:
-                    res.append(TS_Dataset.word2vec[word])
+            if self.word2vec:
+                if word in self.word2vec:
+                    res.append(self.word2vec[word])
                 else:
                     # return TS_Dataset.word2vec['UNK']
                     continue # skip words not in the word2vec model

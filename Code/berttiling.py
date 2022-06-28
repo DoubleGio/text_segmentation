@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 from typing import List, Union, Tuple
-from utils import compute_metrics
-from nltk.tokenize import sent_tokenize
+from utils import compute_metrics, sent_tokenize_plus, smooth
 from transformers import RobertaConfig, RobertaTokenizer, RobertaModel
 from matplotlib import pyplot as plt
 import numpy as np
@@ -47,7 +46,7 @@ class BertTiling:
         Takes (list of) sentences, segments it, plots the results and prints the pk and windowdiff scores.
         """
         if isinstance(input, str):
-            input = sent_tokenize(input)
+            input = sent_tokenize_plus(input)
         res = self.topic_segmentation_bert(input, return_all=True)
         self.plot(*res, ground_truth)
         pk, wd = compute_metrics([1] + res[-1], ground_truth) # Add 1 to start of predictions to signify start of text (which counts as boundary)
@@ -59,7 +58,7 @@ class BertTiling:
         Takes list of sentences and produces list of binary predictions.
         """
         if isinstance(input, str):
-            input = sent_tokenize(input)
+            input = sent_tokenize_plus(input)
 
         # parallel inference; creat batches of sentences to process
         batches_features = []
@@ -221,7 +220,6 @@ class BertTiling:
                     boundaries[dt[1]] = 0
         return boundaries
 
-
     def _smooth_scores(self, gap_scores, smoothing_passes=1):
         "Wraps the smooth function from the SciPy Cookbook"
         smoothed_scores = np.array(gap_scores[:])
@@ -239,56 +237,3 @@ class BertTiling:
             for i in range(min(len(l), n))
         )
 
-# Pasted from the SciPy cookbook: https://scipy-cookbook.readthedocs.io/items/SignalSmooth.html
-def smooth(x, window_len=11, window='flat'):
-    """smooth the data using a window with requested size.
-    
-    This method is based on the convolution of a scaled window with the signal.
-    The signal is prepared by introducing reflected copies of the signal 
-    (with the window size) in both ends so that transient parts are minimized
-    in the begining and end part of the output signal.
-    
-    input:
-        x: the input signal 
-        window_len: the dimension of the smoothing window; should be an odd integer
-        window: the type of window from 'flat', 'hanning', 'hamming', 'bartlett', 'blackman'
-            flat window will produce a moving average smoothing.
-
-    output:
-        the smoothed signal
-        
-    example:
-
-    t=linspace(-2,2,0.1)
-    x=sin(t)+randn(len(t))*0.1
-    y=smooth(x)
-    
-    see also: 
-    
-    numpy.hanning, numpy.hamming, numpy.bartlett, numpy.blackman, numpy.convolve
-    scipy.signal.lfilter
- 
-    TODO: the window parameter could be the window itself if an array instead of a string
-    """
-
-    if x.ndim != 1:
-        raise ValueError("smooth only accepts 1 dimension arrays.")
-
-    if x.size < window_len:
-        raise ValueError("Input vector needs to be bigger than window size.")
-
-    if window_len<3:
-        return x
-
-    if not window in ['flat', 'hanning', 'hamming', 'bartlett', 'blackman']:
-        raise ValueError("Window is on of 'flat', 'hanning', 'hamming', 'bartlett', 'blackman'")
-
-    s=np.r_[2 * x[0] - x[window_len:1:-1], x, 2 * x[-1] - x[-1:-window_len:-1]]
-
-    if window == 'flat': #moving average
-        w=np.ones(window_len, 'd')
-    else:
-        w=eval('np.' + window + '(window_len)')
-
-    y=np.convolve(w / w.sum(), s, mode='same')
-    return y[window_len - 1 : -window_len + 1]

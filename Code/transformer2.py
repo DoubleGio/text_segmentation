@@ -30,7 +30,8 @@ from tqdm import tqdm
 from transformers import BertTokenizerFast, BertModel
 from transformers import logging as tlogging
 from TS_Pipeline import TS_Pipeline
-from transformers2_model import create_model
+# from transformers2_model import create_T2model
+from models import create_T2model
 from utils import get_all_file_names, sectioned_clean_text, sent_tokenize_plus, LoggingHandler
 
 EARLY_STOP = 4
@@ -110,7 +111,7 @@ class Transformer2:
             writer = SummaryWriter(log_dir=f'runs/{cname}/{self.dataset_name}_{now}')
             checkpoint_path = os.path.join(f'checkpoints/{cname}/{self.dataset_name}_{now}')
             
-            model = create_model(input_size=self.vec_size, set_device=device)
+            model = create_T2model(input_size=self.vec_size, set_device=device)
             model.load_state_dict(state['state_dict'])
             logger.info(f"Loaded model from {self.load_from}.")
 
@@ -126,7 +127,7 @@ class Transformer2:
             checkpoint_path = os.path.join(f'checkpoints/{cname}/{self.dataset_name}_{now}')
             os.makedirs(checkpoint_path, exist_ok=True)
 
-            model = create_model(input_size=self.vec_size, set_device=device)
+            model = create_T2model(input_size=self.vec_size, set_device=device)
             optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
             best_val_scores = [np.inf, np.inf] # (pk, windowdiff)

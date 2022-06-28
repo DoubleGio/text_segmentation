@@ -39,8 +39,8 @@ class PositionalEncoding(nn.Module):
         x = x + self.pos_encoding[:x.size(0)]
         return self.dropout(x)
 
-class TS_Model3(nn.Module):
-    """Model for Text Segmentation."""
+class T2_Model(nn.Module):
+    """Transformers² Model for Text Segmentation."""
     criterion = nn.CrossEntropyLoss()
 
     def __init__(self, d_model: int) -> None:
@@ -68,11 +68,11 @@ class TS_Model3(nn.Module):
         sent_emb = self.out(sent_emb)
         return sent_emb
 
-def create_model(input_size: int, use_cuda=True, set_device: Optional[torch.device] = None) -> TS_Model3:
-    """Create a new TS_Model instance. Uses cuda if available, unless use_cuda=False."""
+def create_T2_model(input_size: int, use_cuda=True, set_device: Optional[torch.device] = None) -> T2_Model:
+    """Create a new T2_Model instance. Uses cuda if available, unless use_cuda=False."""
     global device
     if set_device:
         device = set_device
     elif not use_cuda:
         device = torch.device("cpu")
-    return TS_Model3().to(device)
+    return T2_Model().to(device)

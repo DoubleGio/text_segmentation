@@ -1,8 +1,6 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_packed_sequence, PackedSequence
-import numpy as np
 from typing import Optional, List
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -64,7 +62,7 @@ def zero_state(module, batch_size):
     # * 2 is for the two directions
     return torch.zeros(module.num_layers * 2, batch_size, module.hidden, device=device), torch.zeros(module.num_layers * 2, batch_size, module.hidden, device=device)
 
-def create_model(input_size: int, use_cuda=True, set_device: Optional[torch.device] = None) -> TS_Model:
+def create_TS_model(input_size: int, use_cuda=True, set_device: Optional[torch.device] = None) -> TS_Model:
     """Create a new TS_Model instance. Uses cuda if available, unless use_cuda=False."""
     global device
     if set_device:

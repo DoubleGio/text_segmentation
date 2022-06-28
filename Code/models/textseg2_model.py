@@ -39,7 +39,7 @@ class SentenceEncodingRNN2(nn.Module):
         return attended_outputs
 
 
-class TS_Model2(nn.Module):
+class TS2_Model(nn.Module):
     """Model for Text Segmentation."""
     def __init__(self, sentence_encoder: SentenceEncodingRNN2, hidden=128, num_layers=2):
         super().__init__()
@@ -172,7 +172,7 @@ def supervised_cross_entropy(
     soft_targets: torch.LongTensor,
     target_coh_var: Optional[torch.LongTensor] = None,
     alpha=0.8
-    ) -> torch.TensorType:
+) -> torch.TensorType:
     """
     Computes the supervised cross entropy loss.
     """
@@ -185,12 +185,12 @@ def supervised_cross_entropy(
     loss = alpha*loss_pred + (1-alpha)*loss_sims
     return loss
 
-def create_model2(input_size: int, use_cuda=True, set_device: Optional[torch.device] = None) -> TS_Model2:
-    """Create a new TS_Model2 instance. Uses cuda if available, unless use_cuda=False."""
+def create_TS2_model(input_size: int, use_cuda=True, set_device: Optional[torch.device] = None) -> TS2_Model:
+    """Create a new TS2_Model instance. Uses cuda if available, unless use_cuda=False."""
     global device
     if set_device:
         device = set_device
     elif not use_cuda:
         device = torch.device("cpu")
     sentence_encoder = SentenceEncodingRNN2(input_size=input_size, hidden=256, num_layers=2)
-    return TS_Model2(sentence_encoder, hidden=256, num_layers=2).to(device)
+    return TS2_Model(sentence_encoder, hidden=256, num_layers=2).to(device)

@@ -4,6 +4,7 @@ from tqdm import tqdm
 from typing import Generator, List, Optional, Union, Tuple, Iterable
 from nltk.tokenize import sent_tokenize, regexp_tokenize
 from nltk.metrics.segmentation import pk, windowdiff
+from sklearn.metrics import accuracy_score
 import numpy as np
 
 ENWIKI_LOC = '../Datasets/ENWiki/data'
@@ -16,15 +17,19 @@ SECTION_MARK = '==='
 def clean_text(text: str, mark_sections=False, from_wiki=False) -> str:
     """
     Removes wiki-header and footer.
-    Removes headers (= lines starting with SECTION_MARK) from string.
+    Removes headers (= lines starting with equals signs) from string.
     If mark_sections=True, add SECTION_MARK to mark section beginnings.
     """
     if from_wiki:
         text = remove_wiki_markup(text)
-    if mark_sections:
-        text = re.sub(r'^=+.*\n+', SECTION_MARK, text, flags=re.MULTILINE)
-    else:
-        text = re.sub(r'^=+.*\n+', '', text, flags=re.MULTILINE)
+    sections = re.split(fr'^=+.*\n[^=\w]*', text, flags=re.MULTILINE)
+    text = ''
+    for s in sections:
+        if s:
+            s = re.sub(r'[^\w\d]+$', '.\n', s) # Makes sure there's no weird section endings
+            if mark_sections:
+                s = SECTION_MARK + s
+            text += s
     return text
 
 def sectioned_clean_text(text: str, from_wiki=False) -> List[str]:
@@ -34,14 +39,14 @@ def sectioned_clean_text(text: str, from_wiki=False) -> List[str]:
     """
     if from_wiki:
         text = remove_wiki_markup(text)
-    split = re.split(fr'^=+.*\n+', text, flags=re.MULTILINE)
+    split = re.split(fr'^=+.*\n[^=\w]*', text, flags=re.MULTILINE)
     return list(filter(None, split))
 
 def remove_wiki_markup(text: str) -> str:
     """Removes wiki-header and footer."""
     text = re.sub(r'^(?:(<doc)|(\n<\/doc)).*\n+', '', text, flags=re.MULTILINE)
-    for token in ["***LIST***", "***formula***", "***codice***"]:
-        text = text.replace(token, "")
+    for token in ["LIST", "formula", "codice"]:
+        text = re.sub(fr'\*\*\*{token}\*\*\*.*\n+', '', text, flags=re.MULTILINE)
     return text
 
 def sent_tokenize_plus(text: str) -> List[str]:
@@ -56,7 +61,7 @@ def word_tokenize(sentence: str) -> List[str]:
     """sentence: String to tokenize."""
     return regexp_tokenize(sentence.lower(), pattern=r'[\wÀ-ÖØ-öø-ÿ\-\']+')
 
-def compute_metrics(predictions: Iterable[int], ground_truth: Iterable[int], k: Optional[int] = None, quiet=True) -> Tuple[float, float]:
+def compute_metrics(predictions: Iterable[int], ground_truth: Iterable[int], k: Optional[int] = None, return_acc=False, quiet=True) -> Tuple[float, float]:
     """
     Turns predictions/ground_truth Iterable[int] into Strings for use in nltk pk & windowdiff functions.
     >>> [1,0,1] --> "101"
@@ -73,11 +78,13 @@ def compute_metrics(predictions: Iterable[int], ground_truth: Iterable[int], k: 
             raise TypeError(f"{x} is not iterable.")
 
     if len(predictions) != len(ground_truth):
-        raise ValueError("Predictions and ground truth must have same length.")
+        raise ValueError(f"Predictions ({len(predictions)}) and ground truth ({len(ground_truth)}) must have same length.")
 
     if not isinstance(predictions, list): predictions = try_iter_to_list(predictions)
     if not isinstance(ground_truth, list): ground_truth = try_iter_to_list(ground_truth)
     
+    if return_acc:
+        acc = accuracy_score(ground_truth, predictions)
     # Turn List[int] into String
     # [1,0,1] --> "101"
     predictions = "".join(map(str, predictions))
@@ -91,7 +98,8 @@ def compute_metrics(predictions: Iterable[int], ground_truth: Iterable[int], k: 
     if not quiet:
         print(f'Pk      = {pk_score}')
         print(f'Windiff = {windiff_score}')
-    return pk_score, windiff_score
+        if return_acc: print(f'Acc     = {acc}')
+    return (pk_score, windiff_score, acc) if return_acc else (pk_score, windiff_score)
 
 def get_all_file_names(dir: str) -> List[str]:
     """
@@ -113,17 +121,17 @@ def yield_all_file_names(dir: str) -> Generator[str, None, None]:
             if os.path.isfile(os.path.join(root, file)):
                 yield os.path.join(root, file)
 
-def get_truth(clean_text: Union[str, List[str]]) -> List[int]:
+def generate_boundary_list(marked_text: Union[str, List[str]]) -> List[int]:
     """
-    clean_text = text or list of sentences.
+    marked_text = text or list of sentences.
     Returns a list containing a 1 or 0 for each sentence, 
     signifying whether a section starts here or not, respectively.
     """
-    if isinstance(clean_text, str):
-        clean_text = sent_tokenize_plus(clean_text)
-    if not clean_text[0].startswith(SECTION_MARK):
+    if isinstance(marked_text, str):
+        marked_text = sent_tokenize_plus(marked_text)
+    if not marked_text[0].startswith(SECTION_MARK):
         raise ValueError(f"Text sections_marks are not found/marked with {SECTION_MARK}")
-    return [1 if s.startswith(SECTION_MARK) else 0 for s in clean_text]
+    return [1 if s.startswith(SECTION_MARK) else 0 for s in marked_text]
 
 def subdivide_dir(root: str, N=1000):
     """
@@ -182,9 +190,10 @@ def smooth(x, window_len=11, window='flat'):
         raise ValueError("smooth only accepts 1 dimension arrays.")
 
     if x.size < window_len:
-        raise ValueError("Input vector needs to be bigger than window size.")
+        # raise ValueError("Input vector needs to be bigger than window size.")
+        return x
 
-    if window_len<3:
+    if window_len<3 or x.size<=3:
         return x
 
     if not window in ['flat', 'hanning', 'hamming', 'bartlett', 'blackman']:

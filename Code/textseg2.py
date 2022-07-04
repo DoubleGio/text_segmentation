@@ -18,7 +18,7 @@ rng = np.random.default_rng()
 from utils import sent_tokenize_plus, get_all_file_names, sectioned_clean_text, compute_metrics, LoggingHandler, clean_text, word_tokenize
 
 W2V_NL_PATH = 'text_segmentation/Datasets/word2vec-nl-combined-160.txt' # Taken from https://github.com/clips/dutchembeddings
-EARLY_STOP = 4
+EARLY_STOP = 3
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -478,6 +478,6 @@ if __name__ == "__main__":
     parser.add_argument('--batch_size', help='Batch size', type=int, default=2)
     parser.add_argument('--epochs', help='Number of epochs to run', type=int, default=10)
     parser.add_argument('--load_from', help='Where to load an existing model from', type=str, default=None)
-    parser.add_argument('--num_workers', help='How many workers to use for data loading', type=int, default=16)
+    parser.add_argument('--num_workers', help='How many workers to use for data loading', type=int, default=8)
 
     main(parser.parse_args())

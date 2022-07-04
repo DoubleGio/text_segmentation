@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-from typing import List, Union, Tuple
-from utils import compute_metrics, sent_tokenize_plus, smooth
-from transformers import RobertaConfig, RobertaTokenizer, RobertaModel
+from typing import Any, Dict, List, Union, Tuple
+from utils import compute_metrics, sent_tokenize_plus, smooth, clean_text, generate_boundary_list
+from transformers import RobertaConfig, RobertaTokenizerFast, RobertaModel
+from transformers import logging as tlogging
 from matplotlib import pyplot as plt
+from TS_Pipeline import TS_Pipeline
 import numpy as np
 import torch
 
 PARALLEL_INFERENCE_INSTANCES = 20
+tlogging.set_verbosity_error()
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 class BertTiling:
     """
@@ -19,61 +23,50 @@ class BertTiling:
         smoothing_passes=1,
         smoothing_width=2,
         cutoff_policy='HC',
-        language='en'
+        lang='en'
     ) -> None:
         if cutoff_policy in ['HC', 'LC']:
             self.cutoff_policy = cutoff_policy
         else:
             raise ValueError(f"Cutoff-policy '{cutoff_policy}' not supported, try 'HC' or 'LC'.")
 
-        if language == 'en':
+        if lang == 'en':
             roberta_config = RobertaConfig.from_pretrained('roberta-base')
-            self.roberta_tokenizer = RobertaTokenizer.from_pretrained('roberta-base', config=roberta_config)
-            self.roberta_model = RobertaModel.from_pretrained('roberta-base', config=roberta_config)
-        elif language == 'nl':
+            roberta_tokenizer = RobertaTokenizerFast.from_pretrained('roberta-base', config=roberta_config)
+            roberta_model = RobertaModel.from_pretrained('roberta-base', config=roberta_config)
+        elif lang == 'nl':
             roberta_config = RobertaConfig.from_pretrained('pdelobelle/robbert-v2-dutch-base')
-            self.roberta_tokenizer = RobertaTokenizer.from_pretrained('pdelobelle/robbert-v2-dutch-base', config=roberta_config)
-            self.roberta_model = RobertaModel.from_pretrained('pdelobelle/robbert-v2-dutch-base', config=roberta_config)
+            roberta_tokenizer = RobertaTokenizerFast.from_pretrained('pdelobelle/robbert-v2-dutch-base', config=roberta_config)
+            roberta_model = RobertaModel.from_pretrained('pdelobelle/robbert-v2-dutch-base', config=roberta_config)
         else:
-            raise ValueError(f"Language '{language}' not recognized, try 'en' or 'nl' instead.")
+            raise ValueError(f"Language '{lang}' not recognized, try 'en' or 'nl' instead.")
         
-        self.k = k
+        self.pipeline = BertTilingPipeline(roberta_tokenizer, roberta_model, device, batch_size=1, k=k)
         self.smoothing_passes = smoothing_passes
         self.smoothing_width = smoothing_width
 
-    def evaluate(self, input: Union[str, List[str]], ground_truth: List[int]):
+    def evaluate(self, input: str, from_wiki=False, quiet=True, plot=False):
         """
         Takes (list of) sentences, segments it, plots the results and prints the pk and windowdiff scores.
         """
-        if isinstance(input, str):
-            input = sent_tokenize_plus(input)
-        res = self.topic_segmentation_bert(input, return_all=True)
-        self.plot(*res, ground_truth)
-        pk, wd = compute_metrics([1] + res[-1], ground_truth) # Add 1 to start of predictions to signify start of text (which counts as boundary)
-        print(f'Pk-score      = {pk:.3}')
-        print(f'Windiff-score = {wd:.3}')
+        res = self.topic_segmentation_bert(input, from_wiki=from_wiki, return_all=True)
+        ground_truth = generate_boundary_list(clean_text(input, mark_sections=True, from_wiki=from_wiki))
+        if plot:
+            self.plot(*res, ground_truth)
+        pk, wd, acc = compute_metrics(res[-1], ground_truth[1:], return_acc=True, quiet=quiet)
+        return pk, wd, acc
 
-    def topic_segmentation_bert(self, input: Union[str, List[str]], return_all=False) -> List[int]:
+    def topic_segmentation_bert(self, input: str, from_wiki=False, return_all=False) -> List[int]:
         """
-        Takes list of sentences and produces list of binary predictions.
+        Takes a string and produces list of binary predictions.
         """
-        if isinstance(input, str):
-            input = sent_tokenize_plus(input)
+        block_scores = self.pipeline(input, from_wiki=from_wiki)
+        block_scores_smooth = self._smooth_scores(block_scores)
 
-        # parallel inference; creat batches of sentences to process
-        batches_features = []
-        for batch_sentences in self._split_list(input, PARALLEL_INFERENCE_INSTANCES):
-            # Create sentence representations
-            batches_features.append(self._get_features_from_sentence(batch_sentences))
-        features = [feature for batch in batches_features for feature in batch] # Flattens batches
-
-        block_score = self._block_comparion(features)
-        block_score_smooth = self._smooth_scores(block_score)
-
-        depth_score = self._depth_calc(block_score_smooth)
-        predictions = self._identify_boundaries(depth_score)
+        depth_scores = self._depth_calc(block_scores_smooth)
+        predictions = self._identify_boundaries(depth_scores)
         if return_all:
-            return block_score, block_score_smooth, depth_score, predictions
+            return block_scores, block_scores_smooth, depth_scores, predictions
         return predictions
 
     def plot(
@@ -191,11 +184,29 @@ class BertTiling:
             batch_features.append(sentence_features[0])
         return batch_features
 
-    def _identify_boundaries(self, depth_scores: List[float]) -> List[int]:
+    def _identify_boundaries(self, depth_scores: List[float], threshold=0.6) -> List[int]:
         """
-        Identify boundaries (method taken from NLTK texttiling implementation).
+        Identifies boundaries. Follows original implementation.
         """
-        boundaries = [0 for _ in depth_scores]
+        boundaries = [0] * len(depth_scores)
+        local_maxima = []
+        local_maxima_i = []
+        threshold = threshold * max(depth_scores)
+        # threshold = np.mean(depth_scores) - np.std(depth_scores)
+        for i in range(1, len(depth_scores) - 1):
+            if depth_scores[i - 1] < depth_scores[i] > depth_scores[i + 1]:
+                local_maxima.append(depth_scores[i])
+                local_maxima_i.append(i)
+        for lm, lmi in zip(local_maxima, local_maxima_i):
+            if lm > threshold:
+                boundaries[lmi] = 1
+        return boundaries
+
+    def _identify_boundaries_nltk(self, depth_scores: List[float]) -> List[int]:
+        """
+        Identify boundaries. Follows NLTK implementation.
+        """
+        boundaries = [0] * len(depth_scores)
 
         avg = sum(depth_scores) / len(depth_scores)
         stdev = np.std(depth_scores)
@@ -220,9 +231,9 @@ class BertTiling:
                     boundaries[dt[1]] = 0
         return boundaries
 
-    def _smooth_scores(self, gap_scores, smoothing_passes=1):
+    def _smooth_scores(self, gap_scores: torch.FloatTensor, smoothing_passes=1):
         "Wraps the smooth function from the SciPy Cookbook"
-        smoothed_scores = np.array(gap_scores[:])
+        smoothed_scores = gap_scores.numpy()
         for _ in range(smoothing_passes):
             smoothed_scores = smooth(smoothed_scores, window_len=self.smoothing_width + 1)
         return smoothed_scores
@@ -237,3 +248,52 @@ class BertTiling:
             for i in range(min(len(l), n))
         )
 
+class BertTilingPipeline(TS_Pipeline):
+
+    def _sanitize_parameters(self, from_wiki=False, k=15) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        preprocess_params, forward_params = {}, {}
+        preprocess_params["from_wiki"] = from_wiki
+        forward_params["k"] = k
+        return preprocess_params, forward_params
+
+    def preprocess(self, text: str, from_wiki: bool) -> Dict[str, torch.TensorType]:
+        text = clean_text(text, from_wiki=from_wiki)
+        sentences = sent_tokenize_plus(text)
+        model_inputs = self.tokenizer(
+            text=sentences,
+            padding=True,
+            return_tensors="pt",
+        )
+        return model_inputs
+
+    def _forward(self, input_tensors: Dict[str, torch.TensorType], k: int) -> torch.TensorType:
+        hidden_layer = self.model(**input_tensors, output_hidden_states=True).hidden_states[-2]
+        pooling = torch.nn.AvgPool2d((input_tensors["input_ids"].shape[1], 1))
+        features = pooling(hidden_layer).squeeze()
+
+        # Block comparison
+        # Follows NLTK implementation, to get scores for EACH gap.
+        num_gaps = features.shape[0] - 1
+        gap_scores = torch.empty(num_gaps, device=self.device)
+        similarity_metric = torch.nn.CosineSimilarity(dim=0) # calculate over dim 0
+        for curr_gap in range(num_gaps):
+            if curr_gap < k - 1 and num_gaps - curr_gap > curr_gap:
+                window_size = curr_gap + 1
+            elif curr_gap > num_gaps - k:
+                window_size = num_gaps - curr_gap
+            else:
+                window_size = k
+
+            b1 = self.compute_window(features[curr_gap - window_size + 1 : curr_gap + 1, :])
+            b2 = self.compute_window(features[curr_gap + 1 : curr_gap + window_size + 1, :])
+            gap_scores[curr_gap] = similarity_metric(b1, b2)
+        return gap_scores
+
+    def compute_window(self, features):
+        pooling = torch.nn.MaxPool1d(features.shape[0]) # (dim, n) -> (dim, 1)
+        res = pooling(features.transpose(1, 0))         # hence the transpose: (n, dim) -> (dim, n) -> (dim, 1)
+        return res
+    
+    @staticmethod
+    def no_collate_fn(item):
+        return item[0]

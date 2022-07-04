@@ -1,11 +1,11 @@
 import re, os
+import multiprocessing as mp
 import numpy as np
 from typing import List, Tuple, Union
 from matplotlib import pyplot as plt
 from nltk.tokenize.texttiling import TextTilingTokenizer, BLOCK_COMPARISON, VOCABULARY_INTRODUCTION, LC, HC, DEFAULT_SMOOTHING, TokenTableField, TokenSequence
 from nltk.corpus import stopwords
-from utils import sent_tokenize_plus, clean_text, smooth, compute_metrics, SECTION_MARK
-
+from utils import sent_tokenize_plus, clean_text, smooth, compute_metrics, generate_boundary_list, SECTION_MARK
 
 
 class TextTiling(TextTilingTokenizer):
@@ -48,7 +48,7 @@ class TextTiling(TextTilingTokenizer):
         w: int (default: 20)
             Size (in words) of the pseudosentences.
         k: int (default: 10)
-            Size (in sentences) of the block used in the block comparison method.
+            Size (in sentences) of the block used in the block comparison method. Approximates average section length.
         similarity_method: str (default: 'block_comparison')
             Method used to calculate the similarity scores.
         smoothing_method: str (default: 'default_smoothing')
@@ -77,14 +77,19 @@ class TextTiling(TextTilingTokenizer):
 
     def evaluate(self, text: str, from_wiki=False, quiet=True) -> Tuple[float, float]:
         """Evaluate the texttiling algorithm on a given text, returns the Pk and Windiff scores."""
-        _, _, _, predictions = self.tokenize(text, from_wiki=from_wiki, return_predictions=True)
-        ground_truth = self.get_truth(clean_text(text, mark_sections=True, from_wiki=from_wiki))
-        return compute_metrics(predictions, ground_truth, quiet=quiet)
+        pred_text = self.tokenize(text, from_wiki=from_wiki, return_predictions=False)
+        predictions = generate_boundary_list(SECTION_MARK + SECTION_MARK.join(pred_text))
+        ground_truth = generate_boundary_list(clean_text(text, mark_sections=True, from_wiki=from_wiki))
+        return compute_metrics(predictions[1:], ground_truth[1:], return_acc=True, quiet=quiet)
         
+    def evaluate_batch(self, texts: List[str], batch_size: int, from_wiki=False, quiet=True) -> List[Tuple[float, float]]:
+        """Evaluate the texttiling algorithm on a list of texts, returns the Pk and Windiff scores."""
+        # return [self.evaluate(text, from_wiki=from_wiki, quiet=quiet) for text in texts]
+
     def tokenize(self, text: str, from_wiki=False, return_predictions=False) -> Union[Tuple[List[float], List[float], List[float], List[int]], List[str]]:
         """Return a tokenized copy of *text*, where each "token" represents a separate topic."""
 
-        marked_text = clean_text(text.lower(), mark_sections=True, from_wiki=from_wiki)
+        marked_text = clean_text(text, mark_sections=True, from_wiki=from_wiki)
         cleaned_text = clean_text(text, from_wiki=from_wiki)
 
         # Remove punctuation
@@ -94,7 +99,7 @@ class TextTiling(TextTilingTokenizer):
         nopunct_par_breaks = []
         for sent in sents:
             nopunct_sent = ""
-            for c in re.finditer(fr"[\wÀ-ÖØ-öø-ÿ\-\' ]|([\n\t]+)|({self.section_mark}+)", sent):
+            for c in re.finditer(fr"[\wÀ-ÖØ-öø-ÿ\-\' ]|([\n\t]+)|({self.section_mark}+)", sent.lower()):
                 if c.group(2): # If it's a section marker
                     nopunct_par_breaks.append(len(nopunct_text) + c.start() - len(nopunct_par_breaks) * len(self.section_mark) + 1)
                 elif c.group(1): # If it's a newline or tab
@@ -144,7 +149,6 @@ class TextTiling(TextTilingTokenizer):
                 segment = ""
                 best_distance = np.inf
                 while sent_idx < len(sents):
-                    # sent_wc = len(re.findall(r"[\wÀ-ÖØ-öø-ÿ\-']+", sents[sent_idx]))
                     sent_wc = nopunct_sent_word_counts[sent_idx]
                     if abs(bb - (word_count + sent_wc)) < best_distance: # If adding the sentence to the segment would make the distance smaller
                         word_count += sent_wc
@@ -192,6 +196,35 @@ class TextTiling(TextTilingTokenizer):
             for i in range(0, len(wrdindex_list), w)
         ]
 
+    def _identify_boundaries(self, depth_scores):
+        """Identifies boundaries at the peaks of similarity score
+        differences"""
+
+        boundaries = [0 for _ in depth_scores]
+
+        avg = sum(depth_scores) / len(depth_scores)
+        stdev = np.std(depth_scores)
+
+        if self.cutoff_policy == LC:
+            cutoff = avg - stdev
+        else:
+            cutoff = avg - stdev / 2.0
+
+        depth_tuples = sorted(zip(depth_scores, range(len(depth_scores))))
+        depth_tuples.reverse()
+        hp = list(filter(lambda x: x[0] > cutoff, depth_tuples))
+
+        for dt in hp:
+            boundaries[dt[1]] = 1
+            for dt2 in hp:  # undo if there is a boundary close already
+                if (
+                    dt[1] != dt2[1]
+                    and abs(dt2[1] - dt[1]) < 4
+                    and boundaries[dt2[1]] == 1
+                ):
+                    boundaries[dt[1]] = 0
+        return boundaries
+
     def _normalize_boundaries(self, text, boundaries, paragraph_breaks):
         """
         Normalize the boundaries identified to the closest sentence start.
@@ -230,16 +263,16 @@ class TextTiling(TextTilingTokenizer):
 
     def get_truth(self, text: str):
         # Remove tabs/newlines and punctuation
-        text = re.sub(r"[\n\t]+", " ", text).lower()
-        text = "".join(re.findall(r"[\wÀ-ÖØ-öø-ÿ\-\' =]", text)) # A bit redundant, but still
-        word_list = re.findall(r"[\wÀ-ÖØ-öø-ÿ\-\'=]+", text)
+        text = re.sub(r"[\n]+", " ", text).lower()
+        text = "".join(re.findall(r"[\wÀ-ÖØ-öø-ÿ\-\' \t]", text)) # A bit redundant, but still
+        word_list = re.findall(r"[\wÀ-ÖØ-öø-ÿ\-\'\t]+", text)
         truths = []
         for i in range(self.w, len(word_list), self.w):
             truths.append(int(any(word.startswith(self.section_mark) for word in word_list[i:i+self.w])))
-        return truths + [0]
+        return truths
 
     def get_truth_per_word(self, text:str):
-        text = re.sub(r"[\n\t]+", " ", text)
+        text = re.sub(r"[\n]+", " ", text)
         nopunct_t = "".join(re.findall(fr"(?:[\wÀ-ÖØ-öø-ÿ\-\' ]|{self.section_mark})", text.lower()))
         sep_t = re.findall(fr"(?:[\wÀ-ÖØ-öø-ÿ\-\']|{self.section_mark})+", nopunct_t) # List all words (inc. starting with '==='); ignore punctuation etc.
         return [1 if s.startswith(f'{self.section_mark}') else 0 for s in sep_t]

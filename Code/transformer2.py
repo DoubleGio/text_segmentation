@@ -19,22 +19,21 @@ Transformer² model (without S_single & L_topic):
         while all the begin sentences were not masked in order to address the imbalance class problem.'
         basically, remove 70% of the non-boundary sentences for training.
 """
-import os, logging, torch, gc
+import os, logging, torch, gc, argparse
 import numpy as np
 from datetime import datetime, timedelta
-from torch.utils.data import Dataset, IterableDataset, DataLoader
+import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 from typing import Dict, List, Optional, Tuple, Any, Callable, Generator
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
-from transformers import BertTokenizerFast, BertModel
+from transformers import BatchEncoding, BertTokenizerFast, BertModel
 from transformers import logging as tlogging
 from TS_Pipeline import TS_Pipeline
-# from transformers2_model import create_T2model
-from models import create_T2model
-from utils import get_all_file_names, sectioned_clean_text, sent_tokenize_plus, LoggingHandler
+from models import create_T2_model
+from utils import compute_metrics, get_all_file_names, sectioned_clean_text, sent_tokenize_plus, LoggingHandler
 
-EARLY_STOP = 4
+EARLY_STOP = 3
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -68,6 +67,7 @@ class Transformer2:
                 bert_model = BertModel.from_pretrained('GroNLP/bert-base-dutch-cased')
             else:
                 raise ValueError(f"Language {language} not supported.")
+        self.emb_size = bert_model.config.hidden_size
 
         if not use_cuda:
             global device 
@@ -80,14 +80,23 @@ class Transformer2:
             self.use_cuda = False if device_name == 'cpu' else True
         
         if dataset_path:
-            self.subsets = {'train': int(subset * splits[0]), 'val': int(subset * splits[1]), 'test': int(subset * splits[2])} if subset else None
             if from_wiki is None:
                 from_wiki = "wiki" in dataset_path.lower()
-            self.load_data(dataset_path, from_wiki, splits, batch_size, num_workers, bert_tokenizer, bert_model)
+            self.load_data(dataset_path, from_wiki, splits, batch_size, num_workers, bert_tokenizer, bert_model, subset)
         self.load_from = load_from
         self.current_epoch = 0
 
-    def load_data(self, dataset_path, from_wiki, splits, batch_size, num_workers, bert_tokenizer, bert_model):
+    def load_data(
+        self,
+        dataset_path: str,
+        from_wiki: bool,
+        splits: List[float],
+        batch_size: int,
+        num_workers: int,
+        bert_tokenizer,
+        bert_model,
+        subset = np.inf,
+    ):
         self.dataset_name = dataset_path.split('/')[-2]
         path_list = get_all_file_names(dataset_path)
 
@@ -99,6 +108,14 @@ class Transformer2:
         self.train_loader = pipe(train_paths)
         self.val_loader = pipe(val_paths)
         self.test_loader = pipe(test_paths)
+        logger.info(f"Loaded {len(self.train_loader)} training examples, {len(self.val_loader)} validation examples, and {len(self.test_loader)} test examples.")
+
+        if subset < len(path_list):
+            self.sizes = {'train': int(subset * splits[0]), 'val': int(subset * splits[1]), 'test': int(subset * splits[2])}
+            logger.info(f"Subsets: train {self.sizes['train']}, validate {self.sizes['val']}, test {self.sizes['test']}")
+        else:
+            self.sizes = {'train': len(self.train_loader), 'val': len(self.val_loader), 'test': len(self.test_loader)}
+
 
     def initialize_run(self, resume=False):
         cname = self.__class__.__name__.lower()
@@ -111,7 +128,7 @@ class Transformer2:
             writer = SummaryWriter(log_dir=f'runs/{cname}/{self.dataset_name}_{now}')
             checkpoint_path = os.path.join(f'checkpoints/{cname}/{self.dataset_name}_{now}')
             
-            model = create_T2model(input_size=self.vec_size, set_device=device)
+            model = create_T2_model(input_size=self.vec_size, set_device=device)
             model.load_state_dict(state['state_dict'])
             logger.info(f"Loaded model from {self.load_from}.")
 
@@ -127,7 +144,7 @@ class Transformer2:
             checkpoint_path = os.path.join(f'checkpoints/{cname}/{self.dataset_name}_{now}')
             os.makedirs(checkpoint_path, exist_ok=True)
 
-            model = create_T2model(input_size=self.vec_size, set_device=device)
+            model = create_T2_model(input_size=self.emb_size, set_device=device)
             optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
             best_val_scores = [np.inf, np.inf] # (pk, windowdiff)
@@ -154,12 +171,13 @@ class Transformer2:
                 }
                 torch.save(state, os.path.join(checkpoint_path, f'epoch_{epoch}'))
                 gc.collect()
-                val_pk, val_wd, threshold = self.validate(model, writer)
+                val_pk, val_wd = self.validate(model, writer)
                 gc.collect()
                 if sum([val_pk, val_wd]) < sum(best_val_scores):
                     non_improvement_count = 0
-                    test_scores = self.test(model, threshold, writer)
-                    logger.result(f"Best model from Epoch {epoch} --- For threshold = {threshold:.4}, Pk = {test_scores[0]:.4}, windowdiff = {test_scores[1]:.4}")
+                    test_scores = self.test(model, writer)
+                    # logger.result(f"Best model from Epoch {epoch} --- For threshold = {threshold:.4}, Pk = {test_scores[0]:.4}, windowdiff = {test_scores[1]:.4}")
+                    logger.result(f"Best model from Epoch {epoch} --- Pk = {test_scores[0]:.4}, windowdiff = {test_scores[1]:.4}")
                     best_val_scores = [val_pk, val_wd]
                     state = {
                         'now': now,
@@ -168,7 +186,7 @@ class Transformer2:
                         'state_dict': model.state_dict(),
                         'optimizer': optimizer.state_dict(),
                         'best_val_scores': best_val_scores,
-                        'threshold': threshold,
+                        # 'threshold': threshold,
                     }
                     torch.save(state, os.path.join(checkpoint_path, f'best_model'))
                 else:
@@ -189,8 +207,7 @@ class Transformer2:
                 if self.use_cuda:
                     sent_embeddings, targets, doc_lengths = self.move_to_cuda(sent_embeddings, targets, doc_lengths)
                 model.zero_grad()
-                output = model(sent_embeddings, targets)
-                # del sents, bert_sents
+                output = model(sent_embeddings, doc_lengths, targets)
 
                 loss = model.criterion(output, targets)
                 loss.backward()
@@ -202,76 +219,84 @@ class Transformer2:
                 pbar.update(len(doc_lengths))
                 torch.cuda.empty_cache()
 
-            train_loss = total_loss.item() / pbar.n # Average loss per doc.
-        logger.info(f"Training Epoch {self.current_epoch + 1} --- Loss = {train_loss:.4}")
+            train_loss = total_loss.item() / self.sizes['train'] # Average loss per doc.
+        logger.info(f"Training Epoch {self.current_epoch} --- Loss = {train_loss:.4}")
         writer.add_scalar('Loss/train', train_loss, self.current_epoch)
 
-    def validate(self, model, writer) -> Tuple[float, float, float]:
+    def validate(self, model, writer) -> Tuple[float, float]:
         model.eval()
-        thresholds = np.arange(0, 1, 0.05)
-        scores = {k: [] for k in thresholds} # (pk, windowdiff) scores for each threshold.
+        # thresholds = np.arange(0, 1, 0.05)
+        # scores = {k: [] for k in thresholds} # (pk, windowdiff) scores for each threshold.
+        scores = []
         total_loss = torch.tensor(0.0, device=device)
 
         with tqdm(desc=f"Validating #{self.current_epoch}", total=self.sizes['val'], leave=False) as pbar:
-            with torch.no_grad():
-                for sents, targets, doc_lengths in self.val_loader:
+            with torch.inference_mode():
+                for sent_embeddings, targets, doc_lengths in self.val_loader:
                     if pbar.n > self.sizes['val']:
                         break
                     if self.use_cuda:
-                        sents, targets, doc_lengths = self.move_to_cuda(sents, targets, doc_lengths)
-                    output = model(sents)
-                    del sents
-                    output, targets, doc_lengths = self.remove_last(output, targets, doc_lengths)
+                        sent_embeddings, targets, doc_lengths = self.move_to_cuda(sent_embeddings, targets, doc_lengths)
+                    output = model(sent_embeddings, doc_lengths)
 
                     loss = model.criterion(output, targets)
                     total_loss += (loss.detach() * len(doc_lengths))
-                    output_softmax = F.softmax(output, dim=1)
 
                     # Calculate the Pk and windowdiff per document (in this batch) and append to scores for each threshold.
-                    for threshold in thresholds:
-                        predictions = (output_softmax[:, 1] > threshold).long()
-                        doc_start_idx = 0
-                        for doc_len in doc_lengths:
-                            pk, wd = compute_metrics(predictions[doc_start_idx:doc_start_idx+doc_len], targets[doc_start_idx:doc_start_idx+doc_len])
-                            scores[threshold].append((pk, wd))
-                            doc_start_idx += doc_len
-                    
+                    # for threshold in thresholds:
+                    #     predictions = (output_softmax[:, 1] > threshold).long()
+                    #     doc_start_idx = 0
+                    #     for doc_len in doc_lengths:
+                    #         pk, wd = compute_metrics(predictions[doc_start_idx:doc_start_idx+doc_len], targets[doc_start_idx:doc_start_idx+doc_len])
+                    #         scores[threshold].append((pk, wd))
+                    #         doc_start_idx += doc_len
+                    predictions = output.argmax(dim=1)
+                    doc_start_idx = 0
+                    for doc_len in doc_lengths:
+                        pk, wd = compute_metrics(predictions[doc_start_idx:doc_start_idx+doc_len], targets[doc_start_idx:doc_start_idx+doc_len])
+                        scores.append((pk, wd))
+                        doc_start_idx += doc_len
+
                     if pbar.n % 10 == 0:
                         pbar.set_postfix(loss=loss.item())
                     pbar.update(len(doc_lengths))
                     torch.cuda.empty_cache()
 
-            val_loss = total_loss.item() / pbar.n # Average loss per doc.
-        best_scores = [np.inf, np.inf] # (pk, windowdiff) scores for the best threshold.
-        best_threshold: float = None
-        for threshold in thresholds:
-            avg_pk_wd = np.mean(scores[threshold], axis=0) # (pk, windowdiff) average for this threshold, over all docs.
-            if sum(avg_pk_wd) < sum(best_scores):
-                best_scores = avg_pk_wd
-                best_threshold = threshold
-        logger.info(f"Validation Epoch {self.current_epoch + 1} --- Loss = {val_loss:.4}, For threshold = {best_threshold:.4}, Pk = {best_scores[0]:.4}, windowdiff = {best_scores[1]:.4}")
+            val_loss = total_loss.item() / self.sizes['val'] # Average loss per doc.
+        # best_scores = [np.inf, np.inf] # (pk, windowdiff) scores for the best threshold.
+        # best_threshold: float = None
+        # for threshold in thresholds:
+        #     avg_pk_wd = np.mean(scores[threshold], axis=0) # (pk, windowdiff) average for this threshold, over all docs.
+        #     if sum(avg_pk_wd) < sum(best_scores):
+        #         best_scores = avg_pk_wd
+        #         best_threshold = threshold
+        avg_pk_wd = np.mean(scores, axis=0)
+        logger.info(f"Validation Epoch {self.current_epoch} --- Loss = {val_loss:.4}, Pk = {avg_pk_wd[0]:.4}, windowdiff = {avg_pk_wd[1]:.4}")
         writer.add_scalar('Loss/val', val_loss, self.current_epoch)
-        writer.add_scalar('pk_score/val', best_scores[0], self.current_epoch)
-        writer.add_scalar('wd_score/val', best_scores[1], self.current_epoch)
-        return best_scores[0], best_scores[1], best_threshold
+        writer.add_scalar('pk_score/val', avg_pk_wd[0], self.current_epoch)
+        writer.add_scalar('wd_score/val', avg_pk_wd[1], self.current_epoch)
+        return avg_pk_wd
 
-    def test(self, model, threshold: float, writer: Optional[SummaryWriter] = None) -> Tuple[float, float]:
+    def test(self, model, writer: Optional[SummaryWriter] = None) -> Tuple[float, float]:
         model.eval()
         scores = []
         with tqdm(desc=f'Testing #{self.current_epoch}', total=self.sizes['test'], leave=False) as pbar:
-            with torch.no_grad():
-                for sents, targets, doc_lengths in self.test_loader:
+            with torch.inference_mode():
+                for sent_embeddings, targets, doc_lengths in self.test_loader:
                     if pbar.n > self.sizes['test']:
                         break
                     if self.use_cuda:
-                        sents, targets, doc_lengths = self.move_to_cuda(sents, targets, doc_lengths)
-                    output = model(sents)
-                    del sents
-                    output, targets, doc_lengths = self.remove_last(output, targets, doc_lengths)
-                    output_softmax = F.softmax(output, dim=1)
+                        sent_embeddings, targets, doc_lengths = self.move_to_cuda(sent_embeddings, targets, doc_lengths)
+                    output = model(sent_embeddings, doc_lengths)
 
-                    # Calculate the Pk and windowdiff per document (in this batch) for the specified threshold.
-                    predictions = (output_softmax[:, 1] > threshold).long()
+                    # # Calculate the Pk and windowdiff per document (in this batch) for the specified threshold.
+                    # predictions = (output_softmax[:, 1] > threshold).long()
+                    # doc_start_idx = 0
+                    # for doc_len in doc_lengths:
+                    #     pk, wd = compute_metrics(predictions[doc_start_idx:doc_start_idx+doc_len], targets[doc_start_idx:doc_start_idx+doc_len])
+                    #     scores.append((pk, wd))
+                    #     doc_start_idx += doc_len
+                    predictions = output.argmax(dim=1)
                     doc_start_idx = 0
                     for doc_len in doc_lengths:
                         pk, wd = compute_metrics(predictions[doc_start_idx:doc_start_idx+doc_len], targets[doc_start_idx:doc_start_idx+doc_len])
@@ -281,12 +306,12 @@ class Transformer2:
                     pbar.update(len(doc_lengths))
                     torch.cuda.empty_cache()
 
-        epoch_pk, epoch_wd = np.mean(scores, axis=0) # (pk, windowdiff) average for this threshold, over all docs.
-        logger.info(f"Testing Epoch {self.current_epoch + 1} --- For threshold = {threshold:.4}, Pk = {epoch_pk:.4}, windowdiff = {epoch_wd:.4}")
+        avg_pk_wd = np.mean(scores, axis=0) # (pk, windowdiff) average for this threshold, over all docs.
+        logger.info(f"Testing Epoch {self.current_epoch} --- Pk = {avg_pk_wd[0]:.4}, windowdiff = {avg_pk_wd[1]:.4}")
         if writer:
-            writer.add_scalar('pk_score/test', epoch_pk, self.current_epoch)
-            writer.add_scalar('wd_score/test', epoch_wd, self.current_epoch)
-        return epoch_pk, epoch_wd
+            writer.add_scalar('pk_score/test', avg_pk_wd[0], self.current_epoch)
+            writer.add_scalar('wd_score/test', avg_pk_wd[1], self.current_epoch)
+        return avg_pk_wd
             
     
     @staticmethod
@@ -296,14 +321,14 @@ class Transformer2:
             yield t.to(device, non_blocking=True)
 
 class Transformer2Pipeline(TS_Pipeline):
-
-    def _sanitize_parameters(self, from_wiki=False, max_sent_len=30) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    def _sanitize_parameters(self, from_wiki=False, max_sent_len=30, max_text_len = 300) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         preprocess_params, forward_params = {}, {}
         preprocess_params["from_wiki"] = from_wiki
         preprocess_params["max_sent_len"] = max_sent_len
+        preprocess_params["max_text_len"] = max_text_len
         return preprocess_params, forward_params
 
-    def preprocess(self, path: str, from_wiki: bool, max_sent_len: int) -> Tuple[Dict[str, torch.TensorType], np.ndarray]:
+    def preprocess(self, path: str, from_wiki: bool, max_sent_len: int, max_text_len: int) -> Tuple[Dict[str, torch.TensorType], np.ndarray]:
         with open(path, 'r') as f:
             text = f.read()
         sections = sectioned_clean_text(text, from_wiki=from_wiki)
@@ -311,10 +336,17 @@ class Transformer2Pipeline(TS_Pipeline):
         targets = np.array([], dtype=int)
         for section in sections:
             s = sent_tokenize_plus(section)
+            if not len(s) > 1: # Skip sections with only one sentence.
+                if len(sections) <= 2: # Skip docs that end up with only one section.
+                    break
+                continue
             sentences += s
             section_targets = np.zeros(len(s), dtype=int)
             section_targets[0] = 1
             targets = np.append(targets, section_targets)
+
+        if not (max_text_len > len(sentences) - 1 > 0):
+            return None
         # Pairwise tokenizing (last sentence is skipped)
         model_inputs = self.tokenizer(
             text=sentences[:-1], 
@@ -330,6 +362,70 @@ class Transformer2Pipeline(TS_Pipeline):
         """Returns the [CLS] token."""
         return self.model(**input_tensors).last_hidden_state[:, 0, :] # (sentences, hidden_size)
 
+    @staticmethod
+    def no_collate_fn(item):
+        item = item[0]
+        return *item, torch.LongTensor([len(item[-1])]) # (*items, doc_length)
+
+    @staticmethod
+    def cat_collate_fn(tokenizer) -> Callable:
+        """Returns the cat_collate function."""
+        t_padding_value = tokenizer.pad_token_id
+
+        def cat_collate(items) -> Tuple[torch.TensorType, torch.TensorType, torch.TensorType]:
+            """Concatenates all items together and addiotnally returns the length of the individual items."""
+            all_model_inputs = {'input_ids': [], 'attention_mask': [], 'token_type_ids': []}
+            all_targets = np.array([], dtype=int)
+            doc_lengths = torch.LongTensor([])
+            max_length = max(item[0]['input_ids'].shape[1] for item in items)
+            for model_input, targets in items:
+                all_targets = np.concatenate((all_targets, targets), axis=0)
+                doc_lengths = torch.cat((doc_lengths, torch.LongTensor([len(targets)])), dim=0)
+                for key, value in model_input.items():
+                    if key == 'input_ids':
+                        if value.shape[1] < max_length:
+                            value = torch.cat((value, torch.zeros(value.shape[0], max_length - value.shape[1], dtype=int) + t_padding_value), dim=1)
+                    else: # key == 'attention_mask' or key == 'token_type_ids'
+                        if value.shape[1] < max_length:
+                            value = torch.cat((value, torch.zeros(value.shape[0], max_length - value.shape[1], dtype=int)), dim=1)
+                    all_model_inputs[key].append(value)
+            
+            for key, value in all_model_inputs.items():
+                all_model_inputs[key] = torch.cat(value, dim=0)
+            return BatchEncoding(all_model_inputs), torch.from_numpy(all_targets), doc_lengths
+            
+        return cat_collate
+
+def main(args):
+    t2 = Transformer2(
+        language=args.lang,
+        bert_name=args.bert_name,
+        dataset_path=args.data_dir,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        use_cuda= not args.disable_cuda,
+        load_from=args.load_from,
+        subset=args.subset,
+    )
+    if args.test:
+        t2.run_test()
+    else:
+        res = t2.run(args.epochs, args.resume)
+    print(f'Best Pk = {res[0]} --- Best windowdiff = {res[1]}')
+
 if __name__ == "__main__":
-    t = Transformer2(language='en', batch_size=3, dataset_path='text_segmentation/Datasets/ENWiki/data_subset', from_wiki=True)
-    t.run()
+    parser = argparse.ArgumentParser(description="Train/Test a Text Segmentation model.")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--test", action="store_true", help="Test mode.")
+    mode.add_argument("--resume", action="store_true", help="Resume training from a checkpoint.")
+    parser.add_argument("--bert_name", type=str, help="Name of the BERT model to use (if not using pre-embedded texts).")
+    parser.add_argument("--lang", type=str, default="en", help="Language to use.")
+    parser.add_argument("--data_dir", type=str, help="Path to the dataset directory.")
+    parser.add_argument("--subset", type=int, help="Use only a subset of the dataset.")
+    parser.add_argument("--disable_cuda", action="store_true", help="Disable cuda (if available).")
+    parser.add_argument('--batch_size', help='Batch size', type=int, default=2)
+    parser.add_argument('--epochs', help='Number of epochs to run', type=int, default=10)
+    parser.add_argument('--load_from', help='Where to load an existing model from', type=str, default=None)
+    parser.add_argument('--num_workers', help='How many workers to use for data loading', type=int, default=8)
+
+    main(parser.parse_args())

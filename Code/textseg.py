@@ -13,10 +13,10 @@ from tqdm import tqdm
 from datetime import datetime, timedelta
 import numpy as np
 rng = np.random.default_rng()
-from utils import get_all_file_names, clean_text, sectioned_clean_text, compute_metrics, LoggingHandler, word_tokenize
+from utils import get_all_file_names, compute_metrics, LoggingHandler, SECTION_MARK
 
 W2V_NL_PATH = 'text_segmentation/Datasets/word2vec-nl-combined-160.txt' # Taken from https://github.com/clips/dutchembeddings
-EARLY_STOP = 4
+EARLY_STOP = 3
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -93,6 +93,8 @@ class TextSeg:
                 word2vec=word2vec,
                 subset=subset
             )
+        else: 
+            TS_Dataset.word2vec = word2vec
         self.load_from = load_from
         self.current_epoch = 0
 
@@ -246,32 +248,29 @@ class TextSeg:
 
         segmented_texts = []
         with tqdm(desc='Segmenting', total=len(text_loader.dataset)) as pbar:
-            with torch.no_grad():
+            with torch.inference_mode():
                 for sents, texts, doc_lengths in text_loader:
                     if sents is None:
+                        segmented_texts.append(None)
                         pbar.update(text_loader.batch_size)
                         continue
-
                     if self.use_cuda:
-                        sents = sents.to(device, non_blocking=True)
-                        doc_lengths = doc_lengths.to(device, non_blocking=True)
+                        sents, doc_lengths = self.move_to_cuda(sents, doc_lengths)
                     output = model(sents)
                     del sents
                     output_softmax = F.softmax(output, dim=1)
-                    output_softmax = output_softmax.cpu().detach().numpy()
-                    predictions = (output_softmax[:, 1] > threshold).astype(int)
-                    del output_softmax, output
 
+                    predictions = (output_softmax[:, 1] > threshold).long()
                     doc_start_idx = 0
                     for doc_len in doc_lengths:
-                        segmented_text = '======\n'
+                        segmented_text = f'{SECTION_MARK}\n'
                         for i, sent in enumerate(texts[doc_start_idx:doc_start_idx+doc_len]):
-                            segmented_text += sent
-                            if predictions[i] == 1:
-                                segmented_text += '\n======\n'
+                            segmented_text += ' ' + sent
+                            if predictions[i] == 1 and i < doc_len-1:
+                                segmented_text += f'\n{SECTION_MARK}\n'
                         doc_start_idx += doc_len
                         segmented_texts.append(segmented_text)
-                        pbar.update(len(texts))
+                        pbar.update(1)
                     torch.cuda.empty_cache()
 
         return segmented_texts
@@ -300,7 +299,8 @@ class TextSeg:
                 pbar.update(len(doc_lengths))
                 torch.cuda.empty_cache()
 
-            train_loss = total_loss.item() / pbar.n # Average loss per doc.
+            train_loss = total_loss.item() / self.sizes['train'] # Average loss per doc.
+            # logger.info(f"Skipped {self.train_loader.dataset.skipped} docs.")
         logger.info(f"Training Epoch {self.current_epoch + 1} --- Loss = {train_loss:.4}")
         writer.add_scalar('Loss/train', train_loss, self.current_epoch)
 
@@ -311,7 +311,7 @@ class TextSeg:
         total_loss = torch.tensor(0.0, device=device)
 
         with tqdm(desc=f"Validating #{self.current_epoch}", total=self.sizes['val'], leave=False) as pbar:
-            with torch.no_grad():
+            with torch.inference_mode():
                 for sents, targets, doc_lengths in self.val_loader:
                     if pbar.n > self.sizes['val']:
                         break
@@ -339,7 +339,7 @@ class TextSeg:
                     pbar.update(len(doc_lengths))
                     torch.cuda.empty_cache()
 
-            val_loss = total_loss.item() / pbar.n # Average loss per doc.
+            val_loss = total_loss.item() / self.sizes['val'] # Average loss per doc.
         best_scores = [np.inf, np.inf] # (pk, windowdiff) scores for the best threshold.
         best_threshold: float = None
         for threshold in thresholds:
@@ -357,7 +357,7 @@ class TextSeg:
         model.eval()
         scores = []
         with tqdm(desc=f'Testing #{self.current_epoch}', total=self.sizes['test'], leave=False) as pbar:
-            with torch.no_grad():
+            with torch.inference_mode():
                 for sents, targets, doc_lengths in self.test_loader:
                     if pbar.n > self.sizes['test']:
                         break

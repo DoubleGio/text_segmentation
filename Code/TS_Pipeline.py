@@ -1,5 +1,5 @@
 from abc import abstractmethod
-from typing import List, Optional, Callable, Any, Dict, Tuple
+from typing import List, Optional, Callable, Any, Dict, Tuple, Union
 import numpy as np
 import torch
 from torch.utils.data import Dataset, IterableDataset, DataLoader
@@ -72,49 +72,34 @@ class TS_Pipeline:
         model_iterator = PipelineIterator(dataloader, self.forward, forward_params, loader_batch_size=self.batch_size)
         return model_iterator
 
-    def __call__(self, inputs: List[str], **kwargs: Any) -> Any:
+    def run_single(self, inputs:str, preprocess_params, forward_params):
+        model_inputs = self.preprocess(inputs, **preprocess_params)
+        model_outputs = self.forward(model_inputs, **forward_params)
+        return model_outputs
+
+    def __call__(self, inputs: Union[List[str], str], **kwargs: Any) -> Any:
         preprocess_params, forward_params = self._sanitize_parameters(**kwargs)
 
         # Fuse __init__ params and __call__ params without modifying the __init__ ones.
         preprocess_params = {**self._preprocess_params, **preprocess_params}
         forward_params = {**self._forward_params, **forward_params}
 
-        return self.get_iterator(inputs, preprocess_params, forward_params)
+        if isinstance(inputs, list):
+            return self.get_iterator(inputs, preprocess_params, forward_params)
+        else:
+            return self.run_single(inputs, preprocess_params, forward_params)
 
     @staticmethod
+    @abstractmethod
     def no_collate_fn(item):
-        item = item[0]
-        return *item, torch.LongTensor([len(item[-1])]) # (*items, doc_length)
+        """Collate function for batch_size=1"""
+        raise NotImplementedError("no_collate_fn not implemented")
 
     @staticmethod
+    @abstractmethod
     def cat_collate_fn(tokenizer) -> Callable:
         """Returns the cat_collate function."""
-        t_padding_value = tokenizer.pad_token_id
-
-        def cat_collate(items) -> Tuple[torch.TensorType, torch.TensorType, torch.TensorType]:
-            """Concatenates all items together and addiotnally returns the length of the individual items."""
-            all_model_inputs = {'input_ids': [], 'attention_mask': [], 'token_type_ids': []}
-            all_targets = np.array([], dtype=int)
-            doc_lengths = torch.LongTensor([])
-            max_length = max(item[0]['input_ids'].shape[1] for item in items)
-            for model_input, targets in items:
-                all_targets = np.concatenate((all_targets, targets), axis=0)
-                doc_lengths = torch.cat((doc_lengths, torch.LongTensor([len(targets)])), dim=0)
-                for key, value in model_input.items():
-                    if key == 'input_ids':
-                        if value.shape[1] < max_length:
-                            value = torch.cat((value, torch.zeros(value.shape[0], max_length - value.shape[1], dtype=int) + t_padding_value), dim=1)
-                    else: # key == 'attention_mask' or key == 'token_type_ids'
-                        if value.shape[1] < max_length:
-                            value = torch.cat((value, torch.zeros(value.shape[0], max_length - value.shape[1], dtype=int)), dim=1)
-                    all_model_inputs[key].append(value)
-            
-            for key, value in all_model_inputs.items():
-                all_model_inputs[key] = torch.cat(value, dim=0)
-            return BatchEncoding(all_model_inputs), torch.from_numpy(all_targets), doc_lengths
-            
-        return cat_collate
-
+        raise NotImplementedError("cat_collate_fn not implemented")
 
 
 class PipelineDataset(Dataset):

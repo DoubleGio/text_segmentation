@@ -1,13 +1,13 @@
-import os, subprocess, shutil, re, utils
+import os, subprocess, shutil, re, utils, argparse
 import numpy as np
 from typing import List, Tuple, Optional, Union
-from utils import SECTION_MARK, clean_text
+from utils import SECTION_MARK, clean_text, get_all_file_names
 
-ORIG_DIR = '../GraphSeg/data/input_orig'
-INPUT_DIR = '../GraphSeg/data/input'
-OUTPUT_DIR = '../GraphSeg/data/output'
-SEG_EN = '../GraphSeg/binary/graphseg_en.jar'
-SEG_NL = '../GraphSeg/binary/graphseg_nl.jar'
+ORIG_DIR = 'text_segmentation/GraphSeg/data/input_orig'
+INPUT_DIR = 'text_segmentation/GraphSeg/data/input'
+OUTPUT_DIR = 'text_segmentation/GraphSeg/data/output'
+SEG_EN = 'text_segmentation/GraphSeg/binary/graphseg_en.jar'
+SEG_NL = 'text_segmentation/GraphSeg/binary/graphseg_nl.jar'
 
 def copy_data(location: Union[str, List[str]], n: Optional[int] = np.inf, wiki=False):
     """
@@ -99,7 +99,7 @@ def calculate_results(from_wiki=False, return_mean=False) -> Union[Tuple[float, 
     else:
         return scores["pk"], scores["windiff"], scores["acc"]
 
-def run_graphseg(location: Union[str, List[str]], lang='en', n: Optional[int] = None, from_wiki=False, relatedness_threshold = 0.25, minimal_seg_size = 2):
+def run_graphseg(location: Union[str, List[str]], lang='en', n: Optional[int] = None, from_wiki=False, relatedness_threshold = 0.25, minimal_seg_size = 2, return_mean = False):
     """
     Run GraphSeg for <n> files in <location>.
 
@@ -127,14 +127,50 @@ def run_graphseg(location: Union[str, List[str]], lang='en', n: Optional[int] = 
     else:
         raise ValueError(f"Language {lang} not supported.")
     try:
-        _ = subprocess.run(
+        subprocess.run(
             ['java', '-jar', jar_loc, INPUT_DIR, OUTPUT_DIR, f'{relatedness_threshold}', f'{minimal_seg_size}', ],
-            stdout=subprocess.DEVNULL, # suppress output
-            stderr=subprocess.DEVNULL,
-            timeout=60, # seconds
+            # stdout=subprocess.DEVNULL, # suppress output
+            # stderr=subprocess.DEVNULL,
+            # timeout=60, # seconds
         )
     except subprocess.TimeoutExpired:
         pass
-    res = calculate_results(from_wiki=from_wiki)
+    res = calculate_results(from_wiki=from_wiki, return_mean=True)
     reset_data_folder()
     return res
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Test GraphSeg")
+    parser.add_argument("--prepare", action="store_true", help="Prepare data for GraphSeg.")
+    parser.add_argument("--results", action="store_true", help="Calculate results.")
+    parser.add_argument("--n", type=int, default=1000, help="Number of files to segment")
+    parser.add_argument("--relatedness_threshold", type=float, default=0.25, help="The threshold to be used in the construction of the relatedness graph: larger values will give large number of small segments, whereas the smaller treshold values will provide a smaller number of coarse segments.")
+    parser.add_argument("--minimal_seg_size", type=int, default=2, help="The minimum size of a segment (in sentences).")
+    parser.add_argument("location", type=str, help="Path to directory containing files or paths to files to be segmented.")
+    args = parser.parse_args()
+
+    from_wiki = "wiki" in args.location.lower()
+    locations = get_all_file_names(args.location)
+    if 'EN' in args.location:
+        lang = 'en'
+        jar_loc = SEG_EN
+    elif 'NL' in args.location:
+        lang = 'nl'
+        jar_loc = SEG_NL
+
+    if args.prepare:
+        reset_data_folder()
+        copy_data(locations, args.n, from_wiki)
+        clean_data(from_wiki)
+        print("Run the jar seperately:")
+        print(f"java -jar {jar_loc} {INPUT_DIR} {OUTPUT_DIR} {args.relatedness_threshold} {args.minimal_seg_size}")
+    elif args.results:
+        res = calculate_results(from_wiki, True)
+        with open("graphseg_results.txt", "a+") as f:
+            f.write(f"{args.location} {args.n} files --- Pk: {res[0]}, windowdiff: {res[1]}, accuracy: {res[2]}")
+        print(f"Pk: {res[0]}, windowdiff: {res[1]}, accuracy: {res[2]}")
+    else:
+        res = run_graphseg(locations, lang, args.n, from_wiki=from_wiki, relatedness_threshold=args.relatedness_threshold, minimal_seg_size=args.minimal_seg_size, return_mean=True)
+        with open("graphseg_results.txt", "a+") as f:
+            f.write(f"{args.location} {args.n} files --- Pk: {res[0]}, windowdiff: {res[1]}, accuracy: {res[2]}")
+        print(f"Pk: {res[0]}, windowdiff: {res[1]}, accuracy: {res[2]}")

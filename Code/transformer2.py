@@ -132,7 +132,7 @@ class Transformer2:
             model.load_state_dict(state['state_dict'])
             logger.info(f"Loaded model from {self.load_from}.")
 
-            optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+            optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
             optimizer.load_state_dict(state['optimizer'])
 
             best_val_scores = state['best_val_scores']
@@ -145,7 +145,7 @@ class Transformer2:
             os.makedirs(checkpoint_path, exist_ok=True)
 
             model = create_T2_model(input_size=self.emb_size, set_device=device)
-            optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+            optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
 
             best_val_scores = [np.inf, np.inf] # (pk, windowdiff)
             non_improvement_count = 0
@@ -176,7 +176,6 @@ class Transformer2:
                 if sum([val_pk, val_wd]) < sum(best_val_scores):
                     non_improvement_count = 0
                     test_scores = self.test(model, writer)
-                    # logger.result(f"Best model from Epoch {epoch} --- For threshold = {threshold:.4}, Pk = {test_scores[0]:.4}, windowdiff = {test_scores[1]:.4}")
                     logger.result(f"Best model from Epoch {epoch} --- Pk = {test_scores[0]:.4}, windowdiff = {test_scores[1]:.4}")
                     best_val_scores = [val_pk, val_wd]
                     state = {
@@ -186,7 +185,6 @@ class Transformer2:
                         'state_dict': model.state_dict(),
                         'optimizer': optimizer.state_dict(),
                         'best_val_scores': best_val_scores,
-                        # 'threshold': threshold,
                     }
                     torch.save(state, os.path.join(checkpoint_path, f'best_model'))
                 else:
@@ -207,7 +205,7 @@ class Transformer2:
                 if self.use_cuda:
                     sent_embeddings, targets, doc_lengths = self.move_to_cuda(sent_embeddings, targets, doc_lengths)
                 model.zero_grad()
-                output = model(sent_embeddings, doc_lengths, targets)
+                output = model(sent_embeddings, doc_lengths)
 
                 loss = model.criterion(output, targets)
                 loss.backward()
@@ -225,8 +223,6 @@ class Transformer2:
 
     def validate(self, model, writer) -> Tuple[float, float]:
         model.eval()
-        # thresholds = np.arange(0, 1, 0.05)
-        # scores = {k: [] for k in thresholds} # (pk, windowdiff) scores for each threshold.
         scores = []
         total_loss = torch.tensor(0.0, device=device)
 
@@ -242,14 +238,6 @@ class Transformer2:
                     loss = model.criterion(output, targets)
                     total_loss += (loss.detach() * len(doc_lengths))
 
-                    # Calculate the Pk and windowdiff per document (in this batch) and append to scores for each threshold.
-                    # for threshold in thresholds:
-                    #     predictions = (output_softmax[:, 1] > threshold).long()
-                    #     doc_start_idx = 0
-                    #     for doc_len in doc_lengths:
-                    #         pk, wd = compute_metrics(predictions[doc_start_idx:doc_start_idx+doc_len], targets[doc_start_idx:doc_start_idx+doc_len])
-                    #         scores[threshold].append((pk, wd))
-                    #         doc_start_idx += doc_len
                     predictions = output.argmax(dim=1)
                     doc_start_idx = 0
                     for doc_len in doc_lengths:
@@ -263,13 +251,6 @@ class Transformer2:
                     torch.cuda.empty_cache()
 
             val_loss = total_loss.item() / self.sizes['val'] # Average loss per doc.
-        # best_scores = [np.inf, np.inf] # (pk, windowdiff) scores for the best threshold.
-        # best_threshold: float = None
-        # for threshold in thresholds:
-        #     avg_pk_wd = np.mean(scores[threshold], axis=0) # (pk, windowdiff) average for this threshold, over all docs.
-        #     if sum(avg_pk_wd) < sum(best_scores):
-        #         best_scores = avg_pk_wd
-        #         best_threshold = threshold
         avg_pk_wd = np.mean(scores, axis=0)
         logger.info(f"Validation Epoch {self.current_epoch} --- Loss = {val_loss:.4}, Pk = {avg_pk_wd[0]:.4}, windowdiff = {avg_pk_wd[1]:.4}")
         writer.add_scalar('Loss/val', val_loss, self.current_epoch)
@@ -288,14 +269,7 @@ class Transformer2:
                     if self.use_cuda:
                         sent_embeddings, targets, doc_lengths = self.move_to_cuda(sent_embeddings, targets, doc_lengths)
                     output = model(sent_embeddings, doc_lengths)
-
-                    # # Calculate the Pk and windowdiff per document (in this batch) for the specified threshold.
-                    # predictions = (output_softmax[:, 1] > threshold).long()
-                    # doc_start_idx = 0
-                    # for doc_len in doc_lengths:
-                    #     pk, wd = compute_metrics(predictions[doc_start_idx:doc_start_idx+doc_len], targets[doc_start_idx:doc_start_idx+doc_len])
-                    #     scores.append((pk, wd))
-                    #     doc_start_idx += doc_len
+                    
                     predictions = output.argmax(dim=1)
                     doc_start_idx = 0
                     for doc_len in doc_lengths:

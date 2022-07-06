@@ -56,28 +56,29 @@ class T2_Model(nn.Module):
             encoder_layer,
             num_layers=5,
         )
-        self.out = nn.Sequential(
-            nn.Linear(d_model, 2),
-            nn.Sigmoid(),
-        )
+        # self.out = nn.Sequential(
+        #     nn.Linear(d_model, 2),
+        #     nn.Sigmoid(),
+        # )
+        self.out = nn.Linear(d_model, 2)
         self.d_model = d_model
 
     def forward(self, sent_emb, doc_lengths, targets: Optional[torch.TensorType] = None) -> torch.TensorType:
         sent_emb = sent_emb * math.sqrt(self.d_model) # scale the embedding (is done in the 'Attention is all you need' paper for no clear reason)
         sent_emb, key_mask = self.batchify(sent_emb, doc_lengths, targets) # (sentences, d_model) -> (batch_size, max_sentence_length, d_model)
         sent_emb = self.pos_encoder(sent_emb)
-        # sent_emb = self.transformer_encoder(sent_emb, mask=self.generate_square_subsequent_mask(sent_emb.shape[1]), src_key_padding_mask=key_mask)
-        sent_emb = self.transformer_encoder(sent_emb, mask=None, src_key_padding_mask=key_mask)
+        sent_emb = self.transformer_encoder(sent_emb, mask=self.generate_square_subsequent_mask(sent_emb.shape[1]), src_key_padding_mask=key_mask)
+        # sent_emb = self.transformer_encoder(sent_emb, mask=None, src_key_padding_mask=key_mask)
         sent_emb = self.out(sent_emb)
         return self.unbatchify(sent_emb, doc_lengths)
 
     @staticmethod
-    def generate_square_subsequent_mask(sz: int) -> torch.TensorType:
+    def generate_square_subsequent_mask(sz: int, diag=1) -> torch.TensorType:
         """
         Generate a square mask for the sequence. The masked positions are filled with float('-inf').
         Unmasked positions are filled with float(0.0).
         """
-        return torch.triu(torch.full((sz, sz), float('-inf'), device=device), diagonal=2)
+        return torch.triu(torch.full((sz, sz), float('-inf'), device=device), diagonal=diag)
 
     @staticmethod
     def batchify(data: torch.TensorType, doc_lengths: torch.TensorType, targets: Optional[torch.TensorType] = None) -> Tuple[torch.TensorType, torch.TensorType]:

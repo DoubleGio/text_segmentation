@@ -36,7 +36,8 @@ def main(n=100):
     with tqdm(desc=f'Processing...', total=len(datasets.keys())) as pbar:
         for dataset, params in datasets.items():
             pbar.set_description(f"Testing {dataset}")
-            paths = rng.choice(utils.get_all_file_names(params['loc']), n, replace=False).tolist()
+            # paths = rng.choice(utils.get_all_file_names(params['loc']), n, replace=False).tolist()
+            paths = utils.get_all_file_names(params['loc'])[:n]
             # pbar.set_postfix_str("processing GraphSeg")
             # with tqdm(desc="Files processed", total=len(paths), leave=False) as pbar2:
             #     for i in range(0, len(paths), BATCH_SIZE):

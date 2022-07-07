@@ -1,0 +1,1 @@
+.\Datasets\ENWiki\0-999\ 1000 files --- Pk: 0.497953685714287, windowdiff: 0.5648363261812737, accuracy: 0.7656314164136305

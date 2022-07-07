@@ -3,6 +3,7 @@ Code/csv_plotter.py
 GraphSeg
 SECTOR-master
 Datasets
+planning.*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

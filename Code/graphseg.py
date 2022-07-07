@@ -142,7 +142,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test GraphSeg")
     parser.add_argument("--prepare", action="store_true", help="Prepare data for GraphSeg.")
     parser.add_argument("--results", action="store_true", help="Calculate results.")
-    parser.add_argument("--n", type=int, default=1000, help="Number of files to segment")
+    parser.add_argument("--n", type=int, help="Number of files to segment")
     parser.add_argument("--relatedness_threshold", type=float, default=0.25, help="The threshold to be used in the construction of the relatedness graph: larger values will give large number of small segments, whereas the smaller treshold values will provide a smaller number of coarse segments.")
     parser.add_argument("--minimal_seg_size", type=int, default=2, help="The minimum size of a segment (in sentences).")
     parser.add_argument("location", type=str, help="Path to directory containing files or paths to files to be segmented.")

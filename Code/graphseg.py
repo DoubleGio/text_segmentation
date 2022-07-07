@@ -22,7 +22,7 @@ def copy_data(location: Union[str, List[str]], n: Optional[int] = np.inf, wiki=F
                 if not os.path.exists(os.path.join(ORIG_DIR, file)):
                     shutil.copy(os.path.join(root, file), ORIG_DIR)
                     if wiki:
-                        with open(os.path.join(ORIG_DIR, file), 'r+') as orig:
+                        with open(os.path.join(ORIG_DIR, file), 'r+', encoding='utf-8') as orig:
                             data = orig.read()
                             orig.seek(0)
                             orig.write(re.sub(r'^(?:(<doc)|(\n<\/doc)).*\n', '', data, flags=re.MULTILINE))
@@ -35,7 +35,7 @@ def copy_data(location: Union[str, List[str]], n: Optional[int] = np.inf, wiki=F
             if not os.path.exists(os.path.join(ORIG_DIR, os.path.basename(file))):
                 shutil.copy(file, ORIG_DIR)
                 if wiki:
-                    with open(os.path.join(ORIG_DIR, os.path.basename(file)), 'r+') as orig:
+                    with open(os.path.join(ORIG_DIR, os.path.basename(file)), 'r+', encoding='utf-8') as orig:
                         data = orig.read()
                         orig.seek(0)
                         orig.write(re.sub(r'^(?:(<doc)|(\n<\/doc)).*\n', '', data, flags=re.MULTILINE))
@@ -48,9 +48,9 @@ def clean_data(from_wiki=False):
     """
     for root, _, files in os.walk(ORIG_DIR):
         for file in files:
-            with open(os.path.join(root, file), 'r') as f:
+            with open(os.path.join(root, file), 'r', encoding='utf-8') as f:
                 doc = f.read()
-            with open(os.path.join(INPUT_DIR, file), 'w') as f2:
+            with open(os.path.join(INPUT_DIR, file), 'w', encoding='utf-8') as f2:
                 f2.write(clean_text(doc, from_wiki=from_wiki))
 
 def reset_data_folder():
@@ -79,9 +79,9 @@ def calculate_results(from_wiki=False, return_mean=False) -> Union[Tuple[float, 
     if len(files) == 0:
         return None, None, None
     for file in files:
-        with open(os.path.join(OUTPUT_DIR, file), 'r') as f:
+        with open(os.path.join(OUTPUT_DIR, file), 'r', encoding='latin-1') as f:
             pred_text = f.read()
-        with open(os.path.join(ORIG_DIR, file), 'r') as f:
+        with open(os.path.join(ORIG_DIR, file), 'r', encoding='utf-8') as f:
             orig_text = f.read()
         pred_text = SECTION_MARK + utils.clean_text(pred_text, mark_sections=True, from_wiki=from_wiki)
         orig_text = utils.clean_text(orig_text, mark_sections=True, from_wiki=from_wiki)
@@ -168,8 +168,9 @@ if __name__ == "__main__":
         print(f"java -jar {jar_loc} {INPUT_DIR} {OUTPUT_DIR} {args.relatedness_threshold} {args.minimal_seg_size}")
     elif args.results:
         res = calculate_results(from_wiki, True)
+        n = len(os.listdir(OUTPUT_DIR))
         with open("graphseg_results.txt", "a+") as f:
-            f.write(f"{args.location} {args.n} files --- Pk: {res[0]}, windowdiff: {res[1]}, accuracy: {res[2]}\n")
+            f.write(f"{args.location} {n} files --- Pk: {res[0]}, windowdiff: {res[1]}, accuracy: {res[2]}\n")
         print(f"Pk: {res[0]}, windowdiff: {res[1]}, accuracy: {res[2]}")
     else:
         res = run_graphseg(locations, lang, args.n, from_wiki=from_wiki, relatedness_threshold=args.relatedness_threshold, minimal_seg_size=args.minimal_seg_size)

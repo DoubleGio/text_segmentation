@@ -25,7 +25,6 @@ def main(n=100):
     }
     methods = [
         'TextTiling',
-        # 'GraphSeg',
         'BertTiling',
     ]
     results = pd.DataFrame(
@@ -33,33 +32,34 @@ def main(n=100):
         index=datasets.keys(), columns=methods
     )
 
-    with tqdm(desc=f'Processing...', total=len(datasets.keys())) as pbar:
+    with tqdm(total=len(datasets.keys())) as pbar:
         for dataset, params in datasets.items():
             pbar.set_description(f"Testing {dataset}")
-            # paths = rng.choice(utils.get_all_file_names(params['loc']), n, replace=False).tolist()
             paths = utils.get_all_file_names(params['loc'])[:n]
-            # pbar.set_postfix_str("processing GraphSeg")
-            # with tqdm(desc="Files processed", total=len(paths), leave=False) as pbar2:
-            #     for i in range(0, len(paths), BATCH_SIZE):
-            #         pk, wd, acc = run_graphseg(paths[i:i+BATCH_SIZE], lang=params['lang'], n=n, from_wiki=params['from_wiki'], relatedness_threshold=0.2, minimal_seg_size=2)
-            #         if pk is not None:
-            #             results.loc[dataset, 'GraphSeg'] += list(zip(pk, wd, acc))
-            #         pbar2.update(len(paths[i:i+BATCH_SIZE]))
-            #     gc.collect()
-            pbar.set_postfix_str("initializing [Text,Bert]Tiling")
+
             tt = TextTiling(lang=params['lang'], w=params['w'], k=params['k'])
-            bt = BertTiling(lang=params['lang'], k=params['k'])
-            pbar.set_postfix_str("")
-            for path in tqdm(paths, desc="Files processed", leave=False):
-                with open(path, 'r') as f:
-                    text = f.read()
-                try:
-                    tt_res = tt.evaluate(text, from_wiki=params['from_wiki'])
-                    bt_res = bt.evaluate(text, from_wiki=params['from_wiki'])
-                except:
-                    continue
-                results.loc[dataset, 'TextTiling'].append(tt_res)
-                results.loc[dataset, 'BertTiling'].append(bt_res)
+            tt_multi = tt.get_eval_multi(params['from_wiki'])
+            with mp.Pool(processes=4) as p:
+                with tqdm(desc="Processing TextTiling", total=len(paths)) as pbar2:
+                    for tt_res in p.imap_unordered(tt_multi, paths):
+                        if tt_res is not None:
+                            results.loc[dataset, 'TextTiling'].append(tt_res)
+                        pbar2.update(1)
+
+            bt = BertTiling(lang=params['lang'], k=params['k'], batch_size=1, num_workers=4)
+            bt_res = bt.eval_multi(paths, from_wiki=params['from_wiki'])
+            results.loc[dataset, 'BertTiling'] = bt_res
+
+            # for path in tqdm(paths, desc="Files processed", leave=False):
+            #     with open(path, 'r') as f:
+            #         text = f.read()
+            #     try:
+            #         tt_res = tt.evaluate(text, from_wiki=params['from_wiki'])
+            #         bt_res = bt.evaluate(text, from_wiki=params['from_wiki'])
+            #     except:
+            #         continue
+            #     results.loc[dataset, 'TextTiling'].append(tt_res)
+            #     results.loc[dataset, 'BertTiling'].append(bt_res)
             pbar.update(1)
 
     results_avg = results.applymap(np.mean, axis=0)
@@ -69,7 +69,7 @@ def main(n=100):
 if __name__ == '__main__':
     # mp.set_start_method('spawn')
     parser = argparse.ArgumentParser()
-    parser.add_argument('n', type=int, default=100, help='Number of files to process')
+    parser.add_argument('n', type=int, default=10_000, help='Number of files to process')
     args = parser.parse_args()
     main(n=args.n)
     

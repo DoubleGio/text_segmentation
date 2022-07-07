@@ -1,4 +1,4 @@
-import re, os, shutil, logging
+import re, os, shutil, logging, nltk
 from functools import partial, partialmethod
 from tqdm import tqdm
 from typing import Generator, List, Optional, Union, Tuple, Iterable
@@ -6,6 +6,7 @@ from nltk.tokenize import sent_tokenize, regexp_tokenize
 from nltk.metrics.segmentation import pk, windowdiff
 from sklearn.metrics import accuracy_score
 import numpy as np
+nltk.download('punkt', quiet=True)
 
 ENWIKI_LOC = '../Datasets/ENWiki/data'
 NLWIKI_LOC = '../Datasets/NLWiki/data'

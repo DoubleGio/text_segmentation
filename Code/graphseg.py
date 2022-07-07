@@ -136,7 +136,6 @@ def run_graphseg(location: Union[str, List[str]], lang='en', n: Optional[int] = 
     except subprocess.TimeoutExpired:
         pass
     res = calculate_results(from_wiki=from_wiki, return_mean=True)
-    reset_data_folder()
     return res
 
 if __name__ == "__main__":

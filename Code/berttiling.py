@@ -5,6 +5,7 @@ from transformers import RobertaConfig, RobertaTokenizerFast, RobertaModel
 from transformers import logging as tlogging
 from matplotlib import pyplot as plt
 from TS_Pipeline import TS_Pipeline
+from tqdm import tqdm
 import numpy as np
 import torch
 
@@ -23,7 +24,9 @@ class BertTiling:
         smoothing_passes=1,
         smoothing_width=2,
         cutoff_policy='HC',
-        lang='en'
+        lang='en',
+        batch_size=1,
+        num_workers=0,
     ) -> None:
         if cutoff_policy in ['HC', 'LC']:
             self.cutoff_policy = cutoff_policy
@@ -41,19 +44,41 @@ class BertTiling:
         else:
             raise ValueError(f"Language '{lang}' not recognized, try 'en' or 'nl' instead.")
         
-        self.pipeline = BertTilingPipeline(roberta_tokenizer, roberta_model, device, batch_size=1, k=k)
+        self.pipeline = BertTilingPipeline(roberta_tokenizer, roberta_model, device, batch_size, num_workers, k=k)
         self.smoothing_passes = smoothing_passes
         self.smoothing_width = smoothing_width
 
     def evaluate(self, input: str, from_wiki=False, quiet=True, plot=False):
         """
-        Takes (list of) sentences, segments it, plots the results and prints the pk and windowdiff scores.
+        Takes a text, segments it, plots the results and prints the pk and windowdiff scores.
         """
         res = self.topic_segmentation_bert(input, from_wiki=from_wiki, return_all=True)
         ground_truth = generate_boundary_list(clean_text(input, mark_sections=True, from_wiki=from_wiki))
         if plot:
             self.plot(*res, ground_truth)
         pk, wd, acc = compute_metrics(res[-1], ground_truth[1:], return_acc=True, quiet=quiet)
+        return pk, wd, acc
+
+    def eval_multi(self, input: List[str], from_wiki=False, quiet=True) -> Tuple[List[float], List[float], List[float]]:
+        pk, wd, acc = [], [], []
+        bs_pipeline = self.pipeline(input, from_wiki=from_wiki)
+        with tqdm(desc="Processing BertTiling", total=len(input)) as pbar:
+            for i, block_scores in enumerate(bs_pipeline):
+                block_scores_smooth = self._smooth_scores(block_scores)
+                depth_scores = self._depth_calc(block_scores_smooth)
+                predictions = self._identify_boundaries(depth_scores)
+                try:
+                    pk_, wd_, acc_ = compute_metrics(
+                        predictions, 
+                        generate_boundary_list(clean_text(input[i], mark_sections=True, from_wiki=from_wiki))[1:], 
+                        return_acc=True, quiet=quiet
+                    )
+                    pk.append(pk_)
+                    wd.append(wd_)
+                    acc.append(acc_)
+                except:
+                    pass
+                pbar.update(1)
         return pk, wd, acc
 
     def topic_segmentation_bert(self, input: str, from_wiki=False, return_all=False) -> List[int]:

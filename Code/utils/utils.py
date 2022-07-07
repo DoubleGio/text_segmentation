@@ -8,11 +8,11 @@ from sklearn.metrics import accuracy_score
 import numpy as np
 nltk.download('punkt', quiet=True)
 
-ENWIKI_LOC = '../Datasets/ENWiki/data'
-NLWIKI_LOC = '../Datasets/NLWiki/data'
-NLNEWS_LOC = '../Datasets/NLNews/data'
-NLAUVI_LOC_C = '../Datasets/NLAuVi/data_concat'
-NLAUVI_LOC_N = '../Datasets/NLAuVi/data_normal'
+ENWIKI_LOC = 'Datasets/ENWiki/data'
+NLWIKI_LOC = 'Datasets/NLWiki/data'
+NLNEWS_LOC = 'Datasets/NLNews/data'
+NLAUVI_LOC_C = 'Datasets/NLAuVi/data_concat'
+NLAUVI_LOC_N = 'Datasets/NLAuVi/data_normal'
 SECTION_MARK = '==='
 
 def clean_text(text: str, mark_sections=False, from_wiki=False) -> str:
@@ -62,7 +62,7 @@ def word_tokenize(sentence: str) -> List[str]:
     """sentence: String to tokenize."""
     return regexp_tokenize(sentence.lower(), pattern=r'[\wÀ-ÖØ-öø-ÿ\-\']+')
 
-def compute_metrics(predictions: Iterable[int], ground_truth: Iterable[int], k: Optional[int] = None, return_acc=False, quiet=True) -> Tuple[float, float]:
+def compute_metrics(predictions: Iterable[int], ground_truth: Iterable[int], k: Optional[int] = None, return_acc=False, quiet=True) -> Union[Tuple[float, float], Tuple[float, float, float]]:
     """
     Turns predictions/ground_truth Iterable[int] into Strings for use in nltk pk & windowdiff functions.
     >>> [1,0,1] --> "101"

@@ -11,7 +11,7 @@ rng = np.random.default_rng()
 # os.environ["TOKENIZERS_PARALLELISM"] = "true"
 BATCH_SIZE = 10
 
-def main(n=100):
+def main(n: int):
     """
     w: pseudosentence length (approximate avg. sentence length)
     k: block comparison size (approximate avg. section size)
@@ -35,7 +35,7 @@ def main(n=100):
     with tqdm(total=len(datasets.keys())) as pbar:
         for dataset, params in datasets.items():
             pbar.set_description(f"Testing {dataset}")
-            paths = utils.get_all_file_names(params['loc'])[:n]
+            paths = utils.get_all_file_names(os.path.join(params['loc'], '0-999'))[:n]
 
             tt = TextTiling(lang=params['lang'], w=params['w'], k=params['k'])
             tt_multi = tt.get_eval_multi(params['from_wiki'])
@@ -69,7 +69,7 @@ def main(n=100):
 if __name__ == '__main__':
     # mp.set_start_method('spawn')
     parser = argparse.ArgumentParser()
-    parser.add_argument('n', type=int, default=10_000, help='Number of files to process')
+    parser.add_argument('n', type=int, default=np.inf, help='Number of files to process')
     args = parser.parse_args()
     main(n=args.n)
     

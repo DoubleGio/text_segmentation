@@ -1,18 +1,18 @@
 import logging, argparse
 from models import create_TS2_model, supervised_cross_entropy
 from textseg import TextSeg
-from TS_Dataset import TS_Dataset
+from TS_Dataset import TS_Dataset2
 from TS_Pipeline import TS_Pipeline
 import torch
 import torch.nn.functional as F
 from sklearn.model_selection import train_test_split
 from torch.nn.utils.rnn import pack_sequence, pad_sequence
 from torch.utils.tensorboard import SummaryWriter
-from typing import Callable, List, Optional, Tuple, Dict, Any
+from typing import Callable, List, Optional, Tuple, Dict, Any, Union, Type
 from tqdm import tqdm
 import numpy as np
 from transformers import logging as tlogging
-from transformers import BertTokenizer, BertModel, BatchEncoding
+from transformers import BertTokenizerFast, BertModel, BatchEncoding
 from gensim.models import KeyedVectors
 rng = np.random.default_rng()
 from utils import sent_tokenize_plus, get_all_file_names, sectioned_clean_text, compute_metrics, LoggingHandler, clean_text, word_tokenize
@@ -37,12 +37,10 @@ class TextSeg2(TextSeg):
             # 'bert-base-uncased' = EN
             # 'GroNLP/bert-base-dutch-cased' = NL
             self.load_data = self.load_pipeline(bert_name)
-        else:
-            self.load_data = self.load_dataset
         super().__init__(**kwargs)
 
     def load_pipeline(self, bert_name: str) -> Callable:
-        bert_tokenizer = BertTokenizer.from_pretrained(bert_name)
+        bert_tokenizer = BertTokenizerFast.from_pretrained(bert_name)
         bert_model = BertModel.from_pretrained(bert_name)
 
         def _load_pipeline(
@@ -74,12 +72,44 @@ class TextSeg2(TextSeg):
             
         return _load_pipeline
 
-    def load_dataset(self, **kwargs) -> None:
-        super().load_data(**kwargs, dataset_class=TS_Dataset2, collate_fn=custom_collate)
+    # Override
+    def init_dataset_class(self, **kwargs) -> Type[TS_Dataset2]:
+        return super().init_dataset_class(**kwargs, dataset_class=TS_Dataset2)
+
+    # Override
+    def get_dataset_class() -> Type[TS_Dataset2]:
+        return TS_Dataset2
 
     # Override
     def initialize_run(self, resume=False, model_creator: Callable = create_TS2_model):
         return super().initialize_run(resume, model_creator)
+
+    # Override
+    def run_test(
+        self,
+        texts: Optional[List[str]] = None,
+        from_wiki = False,
+        batch_size = 8,
+        num_workers = 4,
+        threshold: Optional[float] = None
+    ) -> Tuple[float, float, float]:
+        if self.load_from is None:
+            raise ValueError("Can't test without a load_from path.")
+        if texts is not None:
+            if self.language == 'nl':
+                bert_name = 'GroNLP/bert-base-dutch-cased'
+            else:
+                bert_name = 'bert-base-uncased'
+            bert_tokenizer = BertTokenizerFast.from_pretrained(bert_name)
+            bert_model = BertModel.from_pretrained(bert_name)
+            pipe = Textseg2Pipeline(TS_Dataset2.word2vec, bert_tokenizer, bert_model, device, batch_size, num_workers, from_wiki=from_wiki)
+            self.test_loader = pipe(texts)
+            self.sizes = {'test': len(self.test_loader)}
+        state = torch.load(self.load_from)
+        model = create_TS2_model(input_size=self.vec_size, set_device=device)
+        model.load_state_dict(state['state_dict'])
+        logger.info(f"Loaded model from {self.load_from}.")
+        return self.test(model, threshold if threshold else state['threshold'], return_acc=True)
 
     # Override
     def train(self, model, optimizer, writer) -> None:
@@ -160,7 +190,7 @@ class TextSeg2(TextSeg):
         return best_scores[0], best_scores[1], best_threshold
 
     # Override
-    def test(self, model, threshold: float, writer: Optional[SummaryWriter]) -> Tuple[float, float]:
+    def test(self, model, threshold: float, writer: Optional[SummaryWriter], return_acc=False) -> Union[Tuple[float, float], Tuple[float, float, float]]:
         model.eval()
         scores = []
         with tqdm(desc=f'Testing #{self.current_epoch}', total=self.sizes['test'], leave=False) as pbar:
@@ -179,119 +209,43 @@ class TextSeg2(TextSeg):
                     predictions = (output_softmax[:, 1] > threshold).long()
                     doc_start_idx = 0
                     for doc_len in doc_lengths:
-                        pk, wd = compute_metrics(predictions[doc_start_idx:doc_start_idx+doc_len], targets[doc_start_idx:doc_start_idx+doc_len])
-                        scores.append((pk, wd))
+                        res = compute_metrics(predictions[doc_start_idx:doc_start_idx+doc_len], targets[doc_start_idx:doc_start_idx+doc_len], return_acc=return_acc)
+                        scores.append(res)
                         doc_start_idx += doc_len
 
                     pbar.update(len(doc_lengths))
                     torch.cuda.empty_cache()
-        epoch_pk, epoch_wd = np.mean(scores, axis=0) # (pk, windowdiff) average for this threshold, over all docs.
-        logger.info(f"Testing Epoch {self.current_epoch + 1} --- For threshold = {threshold:.4}, Pk = {epoch_pk:.4}, windowdiff = {epoch_wd:.4}")
+
+        epoch_avg = np.mean(scores, axis=0) # (pk, windowdiff) average for this threshold, over all docs.
+        logger.info(f"Testing Epoch {self.current_epoch + 1} --- For threshold = {threshold:.4}, Pk = {epoch_avg[0]:.4}, windowdiff = {epoch_avg[1]:.4}")
         if writer:
-            writer.add_scalar('pk_score/test', epoch_pk, self.current_epoch)
-            writer.add_scalar('wd_score/test', epoch_wd, self.current_epoch)        
-        return epoch_pk, epoch_wd
+            writer.add_scalar('pk_score/test', epoch_avg[0], self.current_epoch)
+            writer.add_scalar('wd_score/test', epoch_avg[1], self.current_epoch)
+        return (epoch_avg[0], epoch_avg[1], epoch_avg[2]) if return_acc else (epoch_avg[0], epoch_avg[1])
 
-
-def custom_collate(batch) -> Tuple[torch.Tensor, torch.LongTensor, torch.Tensor, torch.LongTensor]:
-    """
-    Prepare the batch for the model (so we can use data of varying lengths).
-    Follows original implementation.
-    https://pytorch.org/docs/stable/data.html#dataloader-collate-fn
-    """
-    all_bert = []
-    all_data = []
-    all_targets = np.array([])
-    doc_lengths = torch.LongTensor([])
-    for data, targets, bert in batch:
-        for i in range(data.shape[0]):
-            all_data.append(data[i][data[i].sum(dim=1) != 0]) # remove padding
-        all_targets = np.concatenate((all_targets, targets))
-        all_bert.append(bert)
-        doc_lengths = torch.cat((doc_lengths, torch.LongTensor([len(targets)])))
-
-    all_data = pack_sequence(all_data, enforce_sorted=False)
-    if all_targets.dtype == float:
-        all_targets = torch.from_numpy(all_targets).long()
-    return torch.cat(all_bert), all_data, all_targets, doc_lengths
-
-class TS_Dataset2(TS_Dataset):
-
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-    
     # Override
-    def get_data_targets(self, index: int) -> Tuple[torch.FloatTensor, np.ndarray, torch.FloatTensor]:
-        """Get the data, targets and bert embeddings for a document at index."""
-        text = self.get_text(index)
-        data = []
-        targets = np.array([], dtype=int)
-        bert_mask = np.array([], dtype=bool) # Keeps track of which sentences are kept
+    @staticmethod
+    def custom_collate(batch) -> Tuple[torch.Tensor, torch.LongTensor, torch.Tensor, torch.LongTensor]:
+        """
+        Prepare the batch for the model (so we can use data of varying lengths).
+        Follows original implementation.
+        https://pytorch.org/docs/stable/data.html#dataloader-collate-fn
+        """
+        all_bert = []
+        all_data = []
+        all_targets = np.array([])
+        doc_lengths = torch.LongTensor([])
+        for data, targets, bert in batch:
+            for i in range(data.shape[0]):
+                all_data.append(data[i][data[i].sum(dim=1) != 0]) # remove padding
+            all_targets = np.concatenate((all_targets, targets))
+            all_bert.append(bert)
+            doc_lengths = torch.cat((doc_lengths, torch.LongTensor([len(targets)])))
 
-        sections = sectioned_clean_text(text, from_wiki=self.from_wiki)
-        suitable_sections_count = 0
-        for section in sections:
-            sentences = sent_tokenize_plus(section)
-            if not (self.MAX_SECTION_LEN > len(sentences) > 1): # Filter too short or too long sections.
-                if len(sections) <= 2: # Skip docs that end up with just a single section
-                    break
-                bert_mask = np.append(bert_mask, np.zeros(len(sentences), dtype=bool))
-                continue
-            
-            section_len = 0
-            for sentence in sentences:
-                sentence_words = word_tokenize(sentence)
-                if len(sentence_words) > 0:
-                    sentence_emb = self.embed_words(sentence_words)
-                    if len(sentence_emb) > 0:
-                        section_len += 1
-                        data.append(sentence_emb)
-                        bert_mask = np.append(bert_mask, True)
-                        continue
-                bert_mask = np.append(bert_mask, False)
-                    
-            if section_len > 0:
-                sentence_labels = np.zeros(section_len, dtype=int)
-                sentence_labels[-1] = 1 # Last sentence ends a section --> 1.
-                targets = np.append(targets, sentence_labels)
-                suitable_sections_count += 1
-
-        # Get a random document if the current one is empty or has less than two suitable sections.
-        if len(data) == 0 or suitable_sections_count < 2:
-            return self.__getitem__(rng.integers(0, len(self.texts)))
-
-        bert_data = torch.load(self.texts[index].replace('data', 'data_bert') + '.pt')
-        data = pad_sequence(data, batch_first=True) # (num_sents, max_sent_len, embed_dim)
-        if bert_data.size(0) != len(bert_mask):
-            logger.warning('oops')
-        return data, targets, bert_data[bert_mask, :]
-
-    def get_data_raw(self, index: int) -> Tuple[torch.FloatTensor, np.ndarray, torch.FloatTensor]:
-        """Get the data, raw text and bert embeddings for a document at index."""
-        text = self.get_text(index)
-        data = []
-        raw_text = np.array([])
-        bert_mask = np.array([], dtype=bool) # Keeps track of which sentences are kept
-
-        text = clean_text(text, from_wiki=self.from_wiki)
-        sentences = sent_tokenize_plus(text)
-        for sentence in sentences:
-            sentence_words = word_tokenize(sentence)
-            if len(sentence_words) > 0:
-                sentence_emb = self.embed_words(sentence_words)
-                if len(sentence_emb) > 0:
-                    data.append(sentence_emb)
-                    raw_text = np.append(raw_text, sentence)
-                    bert_mask = np.append(bert_mask, True)
-                    continue
-            bert_mask = np.append(bert_mask, False)
-            
-        if len(data) == 0:
-            return None, None
-        
-        bert_data = torch.load(self.texts[index].replace('data', 'data_bert') + '.pt')
-        data = pad_sequence(data, batch_first=True) # (num_sents, max_sent_len, embed_dim)
-        return data, raw_text, bert_data[bert_mask, :]
+        all_data = pack_sequence(all_data, enforce_sorted=False)
+        if all_targets.dtype == float:
+            all_targets = torch.from_numpy(all_targets).long()
+        return torch.cat(all_bert), all_data, all_targets, doc_lengths
 
 
 class Textseg2Pipeline(TS_Pipeline):

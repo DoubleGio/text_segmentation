@@ -131,19 +131,79 @@ class TS_Dataset(Dataset):
         return torch.FloatTensor(np.stack(res)) if res else []
 
 
-def custom_collate(batch) -> Tuple[torch.Tensor, torch.LongTensor, torch.LongTensor]:
-    all_sents = []
-    batched_targets = np.array([])
-    doc_lengths = torch.LongTensor([])
-    for data, targets in batch:
-        if data is not None:
-            for i in range(data.shape[0]):
-                all_sents.append(data[i][data[i].sum(dim=1) != 0]) # remove padding
-            doc_lengths = torch.cat((doc_lengths, torch.LongTensor([len(targets)])))
-            batched_targets = np.concatenate((batched_targets, targets))
-    if len(all_sents) == 0:
-        return None, None, None
-    packed_sents = pack_sequence(all_sents, enforce_sorted=False)
-    if batched_targets.dtype == float:
-        batched_targets = torch.from_numpy(batched_targets).long()
-    return packed_sents, batched_targets, doc_lengths
+class TS_Dataset2(TS_Dataset):
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+    
+    # Override
+    def get_data_targets(self, index: int) -> Tuple[torch.FloatTensor, np.ndarray, torch.FloatTensor]:
+        """Get the data, targets and bert embeddings for a document at index."""
+        text = self.get_text(index)
+        data = []
+        targets = np.array([], dtype=int)
+        bert_mask = np.array([], dtype=bool) # Keeps track of which sentences are kept
+
+        sections = sectioned_clean_text(text, from_wiki=self.from_wiki)
+        suitable_sections_count = 0
+        for section in sections:
+            sentences = sent_tokenize_plus(section)
+            if not (self.MAX_SECTION_LEN > len(sentences) > 1): # Filter too short or too long sections.
+                if len(sections) <= 2: # Skip docs that end up with just a single section
+                    break
+                bert_mask = np.append(bert_mask, np.zeros(len(sentences), dtype=bool))
+                continue
+            
+            section_len = 0
+            for sentence in sentences:
+                sentence_words = word_tokenize(sentence)
+                if len(sentence_words) > 0:
+                    sentence_emb = self.embed_words(sentence_words)
+                    if len(sentence_emb) > 0:
+                        section_len += 1
+                        data.append(sentence_emb)
+                        bert_mask = np.append(bert_mask, True)
+                        continue
+                bert_mask = np.append(bert_mask, False)
+                    
+            if section_len > 0:
+                sentence_labels = np.zeros(section_len, dtype=int)
+                sentence_labels[-1] = 1 # Last sentence ends a section --> 1.
+                targets = np.append(targets, sentence_labels)
+                suitable_sections_count += 1
+
+        # Get a random document if the current one is empty or has less than two suitable sections.
+        if len(data) == 0 or suitable_sections_count < 2:
+            return self.__getitem__(rng.integers(0, len(self.texts)))
+
+        bert_data = torch.load(self.texts[index].replace('data', 'data_bert') + '.pt')
+        data = pad_sequence(data, batch_first=True) # (num_sents, max_sent_len, embed_dim)
+
+        return data, targets, bert_data[bert_mask, :]
+
+    def get_data_raw(self, index: int) -> Tuple[torch.FloatTensor, np.ndarray, torch.FloatTensor]:
+        """Get the data, raw text and bert embeddings for a document at index."""
+        text = self.get_text(index)
+        data = []
+        raw_text = np.array([])
+        bert_mask = np.array([], dtype=bool) # Keeps track of which sentences are kept
+
+        text = clean_text(text, from_wiki=self.from_wiki)
+        sentences = sent_tokenize_plus(text)
+        for sentence in sentences:
+            sentence_words = word_tokenize(sentence)
+            if len(sentence_words) > 0:
+                sentence_emb = self.embed_words(sentence_words)
+                if len(sentence_emb) > 0:
+                    data.append(sentence_emb)
+                    raw_text = np.append(raw_text, sentence)
+                    bert_mask = np.append(bert_mask, True)
+                    continue
+            bert_mask = np.append(bert_mask, False)
+            
+        if len(data) == 0:
+            return None, None
+        
+        bert_data = torch.load(self.texts[index].replace('data', 'data_bert') + '.pt')
+        data = pad_sequence(data, batch_first=True) # (num_sents, max_sent_len, embed_dim)
+        return data, raw_text, bert_data[bert_mask, :]

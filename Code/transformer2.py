@@ -24,7 +24,7 @@ import numpy as np
 from datetime import datetime, timedelta
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
-from typing import Dict, List, Optional, Tuple, Any, Callable, Generator
+from typing import Dict, List, Optional, Tuple, Any, Callable, Generator, Union
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 from transformers import BatchEncoding, BertTokenizerFast, BertModel
@@ -58,6 +58,7 @@ class Transformer2:
         if bert_name:
             bert_tokenizer = BertTokenizerFast.from_pretrained(bert_name)
             bert_model = BertModel.from_pretrained(bert_name)
+            self.language = 'nl' if 'nl' in bert_name else 'en'
         elif language:
             if language == 'en' or language == 'test':
                 bert_tokenizer = BertTokenizerFast.from_pretrained('bert-base-uncased')
@@ -67,6 +68,7 @@ class Transformer2:
                 bert_model = BertModel.from_pretrained('GroNLP/bert-base-dutch-cased')
             else:
                 raise ValueError(f"Language {language} not supported.")
+            self.language = language
         self.emb_size = bert_model.config.hidden_size
 
         if not use_cuda:
@@ -115,7 +117,6 @@ class Transformer2:
             logger.info(f"Subsets: train {self.sizes['train']}, validate {self.sizes['val']}, test {self.sizes['test']}")
         else:
             self.sizes = {'train': len(self.train_loader), 'val': len(self.val_loader), 'test': len(self.test_loader)}
-
 
     def initialize_run(self, resume=False):
         cname = self.__class__.__name__.lower()
@@ -195,6 +196,32 @@ class Transformer2:
         writer.close()
         return best_val_scores
 
+    def run_test(
+        self,
+        texts: Optional[List[str]] = None,
+        from_wiki = False,
+        batch_size = 8,
+        num_workers = 4,
+        threshold: Optional[float] = None
+    ) -> Tuple[float, float, float]:
+        if self.load_from is None:
+            raise ValueError("Can't test without a load_from path.")
+        if texts is not None:
+            if self.language == 'nl':
+                bert_name = 'GroNLP/bert-base-dutch-cased'
+            else:
+                bert_name = 'bert-base-uncased'
+            bert_tokenizer = BertTokenizerFast.from_pretrained(bert_name)
+            bert_model = BertModel.from_pretrained(bert_name)
+            pipe = Transformer2Pipeline(bert_tokenizer, bert_model, device, batch_size, num_workers, from_wiki=from_wiki)
+            self.test_loader = pipe(texts)
+            self.sizes = {'test': len(self.test_loader)}
+        state = torch.load(self.load_from)
+        model = create_T2_model(input_size=self.vec_size, set_device=device)
+        model.load_state_dict(state['state_dict'])
+        logger.info(f"Loaded model from {self.load_from}.")
+        return self.test(model, threshold if threshold else state['threshold'], return_acc=True)
+
     def train(self, model, optimizer, writer) -> None:
         model.train()
         total_loss = torch.tensor(0.0, device=device)
@@ -258,7 +285,7 @@ class Transformer2:
         writer.add_scalar('wd_score/val', avg_pk_wd[1], self.current_epoch)
         return avg_pk_wd
 
-    def test(self, model, writer: Optional[SummaryWriter] = None) -> Tuple[float, float]:
+    def test(self, model, writer: Optional[SummaryWriter] = None, return_acc=False) -> Union[Tuple[float, float], Tuple[float, float, float]]:
         model.eval()
         scores = []
         with tqdm(desc=f'Testing #{self.current_epoch}', total=self.sizes['test'], leave=False) as pbar:
@@ -273,19 +300,19 @@ class Transformer2:
                     predictions = output.argmax(dim=1)
                     doc_start_idx = 0
                     for doc_len in doc_lengths:
-                        pk, wd = compute_metrics(predictions[doc_start_idx:doc_start_idx+doc_len], targets[doc_start_idx:doc_start_idx+doc_len])
-                        scores.append((pk, wd))
+                        res = compute_metrics(predictions[doc_start_idx:doc_start_idx+doc_len], targets[doc_start_idx:doc_start_idx+doc_len], return_acc=return_acc)
+                        scores.append(res)
                         doc_start_idx += doc_len
 
                     pbar.update(len(doc_lengths))
                     torch.cuda.empty_cache()
 
-        avg_pk_wd = np.mean(scores, axis=0) # (pk, windowdiff) average for this threshold, over all docs.
-        logger.info(f"Testing Epoch {self.current_epoch} --- Pk = {avg_pk_wd[0]:.4}, windowdiff = {avg_pk_wd[1]:.4}")
+        epoch_avg = np.mean(scores, axis=0) # (pk, windowdiff) average for this threshold, over all docs.
+        logger.info(f"Testing Epoch {self.current_epoch + 1} --- Pk = {epoch_avg[0]:.4}, windowdiff = {epoch_avg[1]:.4}")
         if writer:
-            writer.add_scalar('pk_score/test', avg_pk_wd[0], self.current_epoch)
-            writer.add_scalar('wd_score/test', avg_pk_wd[1], self.current_epoch)
-        return avg_pk_wd
+            writer.add_scalar('pk_score/test', epoch_avg[0], self.current_epoch)
+            writer.add_scalar('wd_score/test', epoch_avg[1], self.current_epoch)
+        return (epoch_avg[0], epoch_avg[1], epoch_avg[2]) if return_acc else (epoch_avg[0], epoch_avg[1])
             
     
     @staticmethod

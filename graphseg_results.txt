@@ -1,5 +1,5 @@
-Datasets/ENWiki/data 10 files --- Pk: 0.49618321935024595, windowdiff: 0.5879598018776229, accuracy: 0.7513104197605444
-Datasets/ENWiki/data 10 files --- Pk: 0.49618321935024595, windowdiff: 0.5879598018776229, accuracy: 0.7513104197605444
-Datasets/ENWiki 1000 files --- Pk: 0.5456730901418839, windowdiff: 0.6172602488569623, accuracy: 0.7409718873645056
-Datasets/ENWiki 10 files --- Pk: 0.5456730901418839, windowdiff: 0.6172602488569623, accuracy: 0.7409718873645056
-Datasets/ENWiki/data 1000 files --- Pk: 0.4837661498019771, windowdiff: 0.537346090861634, accuracy: 0.7737167300082941
+Datasets/ENWiki/0-999 999 files --- Pk: 0.497953685714287, windowdiff: 0.5648363261812737, accuracy: 0.7656314164136305
+Datasets/NLWiki/data/0-999 999 files --- Pk: 0.5289319784888399, windowdiff: 0.6266367836244794, accuracy: 0.778674199051218
+Datasets/NLNews/data/0-999 999 files --- Pk: 0.6111093653420026, windowdiff: 0.810949623617378, accuracy: 0.791209077471676
+Datasets/NLAuVi/data_normal/0-999 1000 files --- Pk: 0.6415842214357864, windowdiff: 0.9719969548259054, accuracy: 0.7956285652428833
+Datasets/NLAuVi/data_concat/0-999 1000 files --- Pk: 0.718019037650275, windowdiff: 0.9711774310840412, accuracy: 0.7933959051918487

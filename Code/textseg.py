@@ -5,17 +5,18 @@ from gensim.models import KeyedVectors
 from sklearn.model_selection import train_test_split
 import torch
 import torch.nn.functional as F
+from torch.nn.utils.rnn import pack_sequence
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
-from typing import Callable, Generator, List, Optional, Tuple, Type
-from TS_Dataset import TS_Dataset, custom_collate
+from typing import Callable, Generator, List, Optional, Tuple, Type, Union
+from TS_Dataset import TS_Dataset
 from tqdm import tqdm
 from datetime import datetime, timedelta
 import numpy as np
 rng = np.random.default_rng()
 from utils import get_all_file_names, compute_metrics, LoggingHandler, SECTION_MARK
 
-W2V_NL_PATH = 'text_segmentation/Datasets/word2vec-nl-combined-160.txt' # Taken from https://github.com/clips/dutchembeddings
+W2V_NL_PATH = 'Datasets/word2vec-nl-combined-160.txt' # Taken from https://github.com/clips/dutchembeddings
 EARLY_STOP = 3
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 logger = logging.getLogger(__name__)
@@ -39,33 +40,7 @@ class TextSeg:
         use_cuda = True,
         load_from: Optional[str] = None,
         subset = np.inf,
-    ) -> None:
-        if language:
-            if language == 'en':
-                word2vec_path = gensim_api.load('word2vec-google-news-300', return_path=True)
-                word2vec = KeyedVectors.load_word2vec_format(word2vec_path, binary=True, limit=100_000)
-            elif language == 'nl':
-                word2vec = KeyedVectors.load_word2vec_format(W2V_NL_PATH, limit=100_000)
-            elif language == 'test':
-                word2vec = None
-            else:
-                raise ValueError(f"Language {language} not supported, try 'en' or 'nl' instead.")
-        elif word2vec_path:
-            for is_binary in [True, False]:
-                try:
-                    word2vec = KeyedVectors.load_word2vec_format(word2vec_path, binary=is_binary, limit=100_000)
-                    break
-                except FileNotFoundError:
-                    raise FileNotFoundError(f"Could not find word2vec file at {word2vec_path}.")
-                except UnicodeDecodeError:
-                    continue
-            if not word2vec:
-                raise Exception(f"Invalid encoding, could not load word2vec file from {word2vec_path}.")
-        else:
-            raise ValueError("Either a word2vec path or a language must be specified.")
-        # TS_Dataset.word2vec = word2vec
-        self.vec_size = word2vec.vector_size if word2vec else 300
-
+    ) -> None:      
         if num_workers > 0:
             if torch.multiprocessing.get_start_method() == 'spawn':
                 # Multiprocessing only works on Unix systems which support the fork() system call.
@@ -81,6 +56,7 @@ class TextSeg:
             logger.info(f"Using device: {device_name}.")
             self.use_cuda = False if device_name == 'cpu' else True
 
+        self.init_dataset_class(language=language, word2vec_path=word2vec_path)
         if dataset_path:
             if from_wiki is None:
                 from_wiki = "wiki" in dataset_path.lower()
@@ -90,13 +66,42 @@ class TextSeg:
                 splits=splits,
                 batch_size=batch_size,
                 num_workers=num_workers,
-                word2vec=word2vec,
                 subset=subset
             )
-        else: 
-            TS_Dataset.word2vec = word2vec
         self.load_from = load_from
         self.current_epoch = 0
+
+    def init_dataset_class(self, language: Optional[str] = None, word2vec_path: Optional[str] = None, dataset_class: Type[TS_Dataset] = TS_Dataset):
+        if language:
+            if language == 'en':
+                word2vec_path = gensim_api.load('word2vec-google-news-300', return_path=True)
+                word2vec = KeyedVectors.load_word2vec_format(word2vec_path, binary=True, limit=100_000)
+            elif language == 'nl':
+                word2vec = KeyedVectors.load_word2vec_format(W2V_NL_PATH, limit=100_000)
+            elif language == 'test':
+                word2vec = None
+            else:
+                raise ValueError(f"Language {language} not supported, try 'en' or 'nl' instead.")
+            self.language = language
+        elif word2vec_path:
+            for is_binary in [True, False]:
+                try:
+                    word2vec = KeyedVectors.load_word2vec_format(word2vec_path, binary=is_binary, limit=100_000)
+                    break
+                except FileNotFoundError:
+                    raise FileNotFoundError(f"Could not find word2vec file at {word2vec_path}.")
+                except UnicodeDecodeError:
+                    continue
+            if not word2vec:
+                raise Exception(f"Invalid encoding, could not load word2vec file from {word2vec_path}.")
+            self.language = 'nl' if 'nl' in word2vec_path else 'en'
+        else:
+            raise ValueError("Either a word2vec path or a language must be specified.")
+        self.vec_size = word2vec.vector_size if word2vec else 300
+        dataset_class.word2vec = word2vec
+
+    def get_dataset_class(self) -> Type[TS_Dataset]:
+        return TS_Dataset
 
     def load_data(
         self,
@@ -105,15 +110,12 @@ class TextSeg:
         splits: List[float],
         batch_size: int,
         num_workers: int,
-        dataset_class: Type[Dataset] = TS_Dataset,
-        collate_fn: Callable = custom_collate,
-        word2vec: Optional[KeyedVectors] = None,
         subset = np.inf,
     ) -> None:
         """
         Load the right data and pretrained models.
         """
-        dataset_class.word2vec = word2vec
+        dataset_class = self.get_dataset_class()
         self.dataset_name = dataset_path.split('/')[-2]
         path_list = get_all_file_names(dataset_path)
 
@@ -125,9 +127,9 @@ class TextSeg:
         val_dataset = dataset_class(np.array(val_paths), from_wiki)
         test_dataset = dataset_class(np.array(test_paths), from_wiki)
 
-        self.train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate_fn, num_workers=num_workers, pin_memory=self.use_cuda)
-        self.val_loader = DataLoader(val_dataset, batch_size=batch_size, collate_fn=collate_fn, num_workers=num_workers, pin_memory=self.use_cuda)
-        self.test_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=collate_fn, num_workers=num_workers, pin_memory=self.use_cuda)
+        self.train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=self.custom_collate, num_workers=num_workers, pin_memory=self.use_cuda)
+        self.val_loader = DataLoader(val_dataset, batch_size=batch_size, collate_fn=self.custom_collate, num_workers=num_workers, pin_memory=self.use_cuda)
+        self.test_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=self.custom_collate, num_workers=num_workers, pin_memory=self.use_cuda)
         logger.info(f"Loaded {len(train_dataset)} training examples, {len(val_dataset)} validation examples, and {len(test_dataset)} test examples.")
         if subset < len(path_list):
             self.sizes = {'train': int(subset * splits[0]), 'val': int(subset * splits[1]), 'test': int(subset * splits[2])}
@@ -216,14 +218,26 @@ class TextSeg:
         writer.close()
         return best_val_scores
     
-    def run_test(self, threshold: Optional[float] = None) -> Tuple[float, float]:
+    def run_test(
+        self,
+        texts: Optional[List[str]] = None,
+        from_wiki = False,
+        batch_size = 8,
+        num_workers = 4,
+        threshold: Optional[float] = None
+    ) -> Tuple[float, float, float]:
         if self.load_from is None:
             raise ValueError("Can't test without a load_from path.")
+        if texts is not None:
+            dataset_class = self.get_dataset_class()
+            test_dataset = dataset_class(np.array(texts), from_wiki=from_wiki)
+            self.test_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=self.custom_collate, num_workers=num_workers, pin_memory=self.use_cuda)
+            self.sizes = {'test': len(test_dataset)}
         state = torch.load(self.load_from)
         model = create_TS_model(input_size=self.vec_size, set_device=device)
         model.load_state_dict(state['state_dict'])
         logger.info(f"Loaded model from {self.load_from}.")
-        return self.test(model, threshold if threshold else state['threshold'])
+        return self.test(model, threshold if threshold else state['threshold'], return_acc=True)
 
     def segment_text(self, texts: List[str], threshold: Optional[float] = None, from_wiki=False) -> List[str]:
         """
@@ -242,7 +256,7 @@ class TextSeg:
         del state
 
         text_data = TS_Dataset(np.array(texts), from_wiki, labeled=False)
-        text_loader = DataLoader(text_data, batch_size=4, collate_fn=custom_collate, num_workers=0, pin_memory=self.use_cuda)
+        text_loader = DataLoader(text_data, batch_size=4, collate_fn=self.custom_collate, num_workers=0, pin_memory=self.use_cuda)
         logger.info(f"Loaded {len(text_data)} texts.")
         del texts
 
@@ -353,7 +367,7 @@ class TextSeg:
         writer.add_scalar('wd_score/val', best_scores[1], self.current_epoch)
         return best_scores[0], best_scores[1], best_threshold
 
-    def test(self, model, threshold: float, writer: Optional[SummaryWriter] = None) -> Tuple[float, float]:
+    def test(self, model, threshold: float, writer: Optional[SummaryWriter] = None, return_acc=False) -> Union[Tuple[float, float], Tuple[float, float, float]]:
         model.eval()
         scores = []
         with tqdm(desc=f'Testing #{self.current_epoch}', total=self.sizes['test'], leave=False) as pbar:
@@ -372,19 +386,20 @@ class TextSeg:
                     predictions = (output_softmax[:, 1] > threshold).long()
                     doc_start_idx = 0
                     for doc_len in doc_lengths:
-                        pk, wd = compute_metrics(predictions[doc_start_idx:doc_start_idx+doc_len], targets[doc_start_idx:doc_start_idx+doc_len])
-                        scores.append((pk, wd))
+                        res = compute_metrics(predictions[doc_start_idx:doc_start_idx+doc_len], targets[doc_start_idx:doc_start_idx+doc_len], return_acc=return_acc)
+                        scores.append(res)
                         doc_start_idx += doc_len
 
                     pbar.update(len(doc_lengths))
                     torch.cuda.empty_cache()
 
-        epoch_pk, epoch_wd = np.mean(scores, axis=0) # (pk, windowdiff) average for this threshold, over all docs.
-        logger.info(f"Testing Epoch {self.current_epoch + 1} --- For threshold = {threshold:.4}, Pk = {epoch_pk:.4}, windowdiff = {epoch_wd:.4}")
+        epoch_avg = np.mean(scores, axis=0) # (pk, windowdiff) average for this threshold, over all docs.
+        logger.info(f"Testing Epoch {self.current_epoch + 1} --- For threshold = {threshold:.4}, Pk = {epoch_avg[0]:.4}, windowdiff = {epoch_avg[1]:.4}")
         if writer:
-            writer.add_scalar('pk_score/test', epoch_pk, self.current_epoch)
-            writer.add_scalar('wd_score/test', epoch_wd, self.current_epoch)
-        return epoch_pk, epoch_wd
+            writer.add_scalar('pk_score/test', epoch_avg[0], self.current_epoch)
+            writer.add_scalar('wd_score/test', epoch_avg[1], self.current_epoch)
+        return (epoch_avg[0], epoch_avg[1], epoch_avg[2]) if return_acc else (epoch_avg[0], epoch_avg[1])
+    
 
     def remove_last(self, x: torch.Tensor, y: torch.LongTensor, lengths: torch.LongTensor) -> Tuple[torch.Tensor, torch.LongTensor, torch.LongTensor]:
         """For each document in the batch, remove the last sentence prediction/label (as it's unnecessary)."""
@@ -405,6 +420,25 @@ class TextSeg:
         """Moves all given tensors to device."""
         for t in tensors:
             yield t.to(device, non_blocking=True)
+
+    @staticmethod
+    def custom_collate(batch) -> Tuple[torch.Tensor, torch.LongTensor, torch.LongTensor]:
+        all_sents = []
+        batched_targets = np.array([])
+        doc_lengths = torch.LongTensor([])
+        for data, targets in batch:
+            if data is not None:
+                for i in range(data.shape[0]):
+                    all_sents.append(data[i][data[i].sum(dim=1) != 0]) # remove padding
+                doc_lengths = torch.cat((doc_lengths, torch.LongTensor([len(targets)])))
+                batched_targets = np.concatenate((batched_targets, targets))
+        if len(all_sents) == 0:
+            return None, None, None
+        packed_sents = pack_sequence(all_sents, enforce_sorted=False)
+        if batched_targets.dtype == float:
+            batched_targets = torch.from_numpy(batched_targets).long()
+        return packed_sents, batched_targets, doc_lengths
+
 
 def main(args):
     ts = TextSeg(

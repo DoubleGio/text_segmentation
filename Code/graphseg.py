@@ -3,11 +3,11 @@ import numpy as np
 from typing import List, Tuple, Optional, Union
 from utils import SECTION_MARK, clean_text, get_all_file_names
 
-ORIG_DIR = 'text_segmentation/GraphSeg/data/input_orig'
-INPUT_DIR = 'text_segmentation/GraphSeg/data/input'
-OUTPUT_DIR = 'text_segmentation/GraphSeg/data/output'
-SEG_EN = 'text_segmentation/GraphSeg/binary/graphseg_en.jar'
-SEG_NL = 'text_segmentation/GraphSeg/binary/graphseg_nl.jar'
+ORIG_DIR = 'GraphSeg/data/input_orig'
+INPUT_DIR = 'GraphSeg/data/input'
+OUTPUT_DIR = 'GraphSeg/data/output'
+SEG_EN = 'GraphSeg/binary/graphseg_en.jar'
+SEG_NL = 'GraphSeg/binary/graphseg_nl.jar'
 
 def copy_data(location: Union[str, List[str]], n: Optional[int] = np.inf, wiki=False):
     """
@@ -142,7 +142,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test GraphSeg")
     parser.add_argument("--prepare", action="store_true", help="Prepare data for GraphSeg.")
     parser.add_argument("--results", action="store_true", help="Calculate results.")
-    parser.add_argument("--n", type=int, help="Number of files to segment")
+    parser.add_argument("--n", type=int, default=np.inf, help="Number of files to segment")
     parser.add_argument("--relatedness_threshold", type=float, default=0.25, help="The threshold to be used in the construction of the relatedness graph: larger values will give large number of small segments, whereas the smaller treshold values will provide a smaller number of coarse segments.")
     parser.add_argument("--minimal_seg_size", type=int, default=2, help="The minimum size of a segment (in sentences).")
     parser.add_argument("location", type=str, help="Path to directory containing files or paths to files to be segmented.")

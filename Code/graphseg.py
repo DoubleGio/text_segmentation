@@ -171,6 +171,7 @@ if __name__ == "__main__":
         print(f"Pk: {res[0]}, windowdiff: {res[1]}, accuracy: {res[2]}")
     else:
         res = run_graphseg(locations, lang, args.n, from_wiki=from_wiki, relatedness_threshold=args.relatedness_threshold, minimal_seg_size=args.minimal_seg_size)
+        n = len(os.listdir(OUTPUT_DIR))
         with open("graphseg_results.txt", "a+") as f:
-            f.write(f"{args.location} {args.n} files --- Pk: {res[0]}, windowdiff: {res[1]}, accuracy: {res[2]}")
+            f.write(f"{args.location} {n} files --- Pk: {res[0]}, windowdiff: {res[1]}, accuracy: {res[2]}")
         print(f"Pk: {res[0]}, windowdiff: {res[1]}, accuracy: {res[2]}")

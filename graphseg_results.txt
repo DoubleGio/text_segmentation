@@ -1,0 +1,2 @@
+Datasets/ENWiki/data 10 files --- Pk: 0.49618321935024595, windowdiff: 0.5879598018776229, accuracy: 0.7513104197605444
+Datasets/ENWiki/data 10 files --- Pk: 0.49618321935024595, windowdiff: 0.5879598018776229, accuracy: 0.7513104197605444

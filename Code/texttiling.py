@@ -1,4 +1,4 @@
-import re, os
+import re, os, nltk
 import multiprocessing as mp
 import numpy as np
 from typing import List, Tuple, Union, Callable
@@ -6,7 +6,7 @@ from matplotlib import pyplot as plt
 from nltk.tokenize.texttiling import TextTilingTokenizer, BLOCK_COMPARISON, VOCABULARY_INTRODUCTION, LC, HC, DEFAULT_SMOOTHING, TokenTableField, TokenSequence
 from nltk.corpus import stopwords
 from utils import sent_tokenize_plus, clean_text, smooth, compute_metrics, generate_boundary_list, SECTION_MARK
-
+nltk.download('stopwords', quiet=True)
 
 class TextTiling(TextTilingTokenizer):
     """
@@ -82,17 +82,6 @@ class TextTiling(TextTilingTokenizer):
         ground_truth = generate_boundary_list(clean_text(text, mark_sections=True, from_wiki=from_wiki))
         return compute_metrics(predictions[1:], ground_truth[1:], return_acc=True, quiet=quiet)
     
-    def get_eval_multi(self, from_wiki: bool) -> Callable:
-        """Wrapper for the evaluate function that can be used with multiprocessing."""
-        def eval_multi(path):
-            with open(path, 'r') as f:
-                text = f.read()
-            try:
-                return self.evaluate(text, from_wiki=from_wiki)
-            except Exception:
-                return None
-        return eval_multi
-        
     def evaluate_batch(self, texts: List[str], batch_size: int, from_wiki=False, quiet=True) -> List[Tuple[float, float]]:
         """Evaluate the texttiling algorithm on a list of texts, returns the Pk and Windiff scores."""
         # return [self.evaluate(text, from_wiki=from_wiki, quiet=quiet) for text in texts]

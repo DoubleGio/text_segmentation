@@ -61,18 +61,17 @@ class BertTiling:
 
     def eval_multi(self, input: List[str], from_wiki=False, quiet=True) -> Tuple[List[float], List[float], List[float]]:
         pk, wd, acc = [], [], []
-        bs_pipeline = self.pipeline(input, from_wiki=from_wiki)
+        bs_pipeline = self.pipeline(input, from_wiki=from_wiki, path=True)
         with tqdm(desc="Processing BertTiling", total=len(input)) as pbar:
             for i, block_scores in enumerate(bs_pipeline):
                 block_scores_smooth = self._smooth_scores(block_scores)
                 depth_scores = self._depth_calc(block_scores_smooth)
                 predictions = self._identify_boundaries(depth_scores)
+                with open(input[i], 'r', encoding='utf-8') as f:
+                    true_text = f.read()
+                ground_truth = generate_boundary_list(clean_text(true_text, mark_sections=True, from_wiki=from_wiki))
                 try:
-                    pk_, wd_, acc_ = compute_metrics(
-                        predictions, 
-                        generate_boundary_list(clean_text(input[i], mark_sections=True, from_wiki=from_wiki))[1:], 
-                        return_acc=True, quiet=quiet
-                    )
+                    pk_, wd_, acc_ = compute_metrics(predictions, ground_truth[1:], return_acc=True, quiet=quiet)
                     pk.append(pk_)
                     wd.append(wd_)
                     acc.append(acc_)
@@ -275,13 +274,17 @@ class BertTiling:
 
 class BertTilingPipeline(TS_Pipeline):
 
-    def _sanitize_parameters(self, from_wiki=False, k=15) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    def _sanitize_parameters(self, from_wiki=False, path=False, k=15) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         preprocess_params, forward_params = {}, {}
         preprocess_params["from_wiki"] = from_wiki
+        preprocess_params["path"] = path
         forward_params["k"] = k
         return preprocess_params, forward_params
 
-    def preprocess(self, text: str, from_wiki: bool) -> Dict[str, torch.TensorType]:
+    def preprocess(self, text: str, from_wiki: bool, path: bool) -> Dict[str, torch.TensorType]:
+        if path:
+            with open(text, "r", encoding='utf-8') as f:
+                text = f.read()
         text = clean_text(text, from_wiki=from_wiki)
         sentences = sent_tokenize_plus(text)
         model_inputs = self.tokenizer(

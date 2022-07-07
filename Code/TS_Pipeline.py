@@ -136,5 +136,8 @@ class PipelineIterator(IterableDataset):
 
     def __next__(self):
         item = next(self.iterator)
-        return self.forward(item[0]), *item[1:]
+        if isinstance(item, tuple) or isinstance(item, list):
+            return self.forward(item[0], **self.params), *item[1:]
+        else:
+            return self.forward(item, **self.params)
 

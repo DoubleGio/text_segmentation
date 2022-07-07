@@ -4,6 +4,8 @@ GraphSeg
 SECTOR-master
 Datasets
 planning.*
+.vscode
+checkpoints
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

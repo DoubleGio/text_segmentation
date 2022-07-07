@@ -129,7 +129,7 @@ class Transformer2:
             writer = SummaryWriter(log_dir=f'runs/{cname}/{self.dataset_name}_{now}')
             checkpoint_path = os.path.join(f'checkpoints/{cname}/{self.dataset_name}_{now}')
             
-            model = create_T2_model(input_size=self.vec_size, set_device=device)
+            model = create_T2_model(input_size=self.emb_size, set_device=device)
             model.load_state_dict(state['state_dict'])
             logger.info(f"Loaded model from {self.load_from}.")
 
@@ -217,10 +217,10 @@ class Transformer2:
             self.test_loader = pipe(texts)
             self.sizes = {'test': len(self.test_loader)}
         state = torch.load(self.load_from)
-        model = create_T2_model(input_size=self.vec_size, set_device=device)
+        model = create_T2_model(input_size=self.emb_size, set_device=device)
         model.load_state_dict(state['state_dict'])
         logger.info(f"Loaded model from {self.load_from}.")
-        return self.test(model, threshold if threshold else state['threshold'], return_acc=True)
+        return self.test(model, return_acc=True)
 
     def train(self, model, optimizer, writer) -> None:
         model.train()
@@ -330,7 +330,7 @@ class Transformer2Pipeline(TS_Pipeline):
         return preprocess_params, forward_params
 
     def preprocess(self, path: str, from_wiki: bool, max_sent_len: int, max_text_len: int) -> Tuple[Dict[str, torch.TensorType], np.ndarray]:
-        with open(path, 'r') as f:
+        with open(path, 'r', encoding='utf-8') as f:
             text = f.read()
         sections = sectioned_clean_text(text, from_wiki=from_wiki)
         sentences = []

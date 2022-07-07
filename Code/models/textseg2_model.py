@@ -27,7 +27,10 @@ class SentenceEncodingRNN2(nn.Module):
         self.context_vector.data.normal_(0, 0.1) # init context vector with values drawn from a normal dist. with mean 0 and std 0.1
 
     def forward(self, x):
-        batch_size = x.batch_sizes[0]
+        try:
+            batch_size = x.batch_sizes[0]
+        except AttributeError:
+            batch_size = 1
         packed_output, _ = self.lstm(x, zero_state(self, batch_size))
         padded_output, lengths = pad_packed_sequence(packed_output, batch_first=True) # (batch, max sentence len, hidden * 2) 
 

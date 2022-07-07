@@ -111,7 +111,7 @@ class TS_Dataset(Dataset):
 
     def get_text(self, index: int) -> str:
         if self.are_paths:
-            with open(self.texts[index], 'r') as f:
+            with open(self.texts[index], 'r', encoding='utf-8') as f:
                 text = f.read()
         else:
             text = self.texts[index]

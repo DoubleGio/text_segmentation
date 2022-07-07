@@ -190,7 +190,7 @@ class TextSeg2(TextSeg):
         return best_scores[0], best_scores[1], best_threshold
 
     # Override
-    def test(self, model, threshold: float, writer: Optional[SummaryWriter], return_acc=False) -> Union[Tuple[float, float], Tuple[float, float, float]]:
+    def test(self, model, threshold: float, writer: Optional[SummaryWriter] = None, return_acc=False) -> Union[Tuple[float, float], Tuple[float, float, float]]:
         model.eval()
         scores = []
         with tqdm(desc=f'Testing #{self.current_epoch}', total=self.sizes['test'], leave=False) as pbar:
@@ -262,7 +262,7 @@ class Textseg2Pipeline(TS_Pipeline):
         return preprocess_params, forward_params
 
     def preprocess(self, path: str, from_wiki: bool, max_sent_len: int, max_sec_len: int, labeled: bool) -> Tuple[Dict[str, torch.TensorType], torch.FloatTensor, np.ndarray]:
-        with open(path, 'r') as f:
+        with open(path, 'r', encoding='utf-8') as f:
             text = f.read()
         if labeled:
             return self.get_data_targets(text, from_wiki, max_sent_len, max_sec_len)
@@ -362,7 +362,7 @@ class Textseg2Pipeline(TS_Pipeline):
     def no_collate_fn(item):
         item = item[0]
         model_input, data, targets = item
-        if targets.dtype == np.int64:
+        if targets.dtype == int:
             targets = torch.from_numpy(targets)
         return model_input, data, targets, torch.LongTensor([len(targets)])
         

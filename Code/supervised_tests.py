@@ -17,7 +17,7 @@ def main(bs: int, nw: int, n: int):
     methods = [
         'TextSeg',
         'TextSeg2',
-        'Transformers2',
+        'Transformer2',
     ]
     results = pd.DataFrame(
         [[[] for _ in range(len(methods))] for _ in range(len(datasets.keys()))], # Initializes empty lists for each cell
@@ -30,22 +30,16 @@ def main(bs: int, nw: int, n: int):
             paths = utils.get_all_file_names(os.path.join(params['loc'], '0-999'))[:n]
             from_wiki = 'wiki' in dataset.lower()
             lang = 'nl' if 'NL' in dataset else 'en'
-            for name, method in zip(methods, [TextSeg, TextSeg2, Transformer2]):
-                ts = method(language=lang, load_from=os.path.join('../checkpoints/textseg/', params['checkpoints'][0], 'best_model'))
+            for i, (name, method) in enumerate(zip(methods, [TextSeg, TextSeg2, Transformer2])):
+                ts = method(language=lang, load_from=os.path.join('checkpoints', name.lower(), params['checkpoints'][i], 'best_model'))
                 results.loc[dataset, name] = ts.run_test(paths, batch_size=bs, num_workers=nw, from_wiki=from_wiki)
-            # ts = TextSeg(language=lang, load_from=os.path.join('../checkpoints/textseg/', params['checkpoints'][0], 'best_model'))
-            # ts2 = TextSeg2(language=lang, load_from=os.path.join('../checkpoints/textseg2/', params['checkpoints'][0], 'best_model'))
-            # t2 = Transformer2(language=lang, load_from=os.path.join('../checkpoints/transformer2/', params['checkpoints'][0], 'best_model'))
-            # results.loc[dataset]['TextSeg'] = ts.run_test(paths, batch_size=bs, num_workers=nw, from_wiki=from_wiki)
-            # results.loc[dataset]['TextSeg2'] = ts2.run_test(paths, batch_size=bs, n_workers=nw, from_wiki=from_wiki)
-            # results.loc[dataset]['Transformers2'] = t2.run_test(paths, batch_size=bs, n_workers=nw, from_wiki=from_wiki)
             pbar.update(1)
     results.to_csv('supervised_tests.csv')
     print(results)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--bs', type=int, default=1)
+    parser.add_argument('--bs', type=int, default=2) # TODO: Fix for batch size = 1
     parser.add_argument('--nw', type=int, default=0)
     parser.add_argument('--n', type=int, default=np.inf)
     args = parser.parse_args()

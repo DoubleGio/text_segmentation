@@ -67,7 +67,9 @@ def main(n: Optional[int] = None):
             results.loc[dataset, 'BertTiling'] = bt_res
             pbar.update(1)
 
-    results_avg = results.applymap(np.mean, axis=1)
+    avg_tt = results['TextTiling'].apply(np.mean, axis=0)
+    avg_bt = results['BertTiling'].apply(np.mean, axis=1)
+    results_avg = pd.concat([avg_tt, avg_bt], axis=1)
     results_avg.to_csv('unsupervised_tests.csv')
     print(results_avg)
 

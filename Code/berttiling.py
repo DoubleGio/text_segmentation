@@ -64,19 +64,20 @@ class BertTiling:
         bs_pipeline = self.pipeline(input, from_wiki=from_wiki, path=True)
         with tqdm(desc="Processing BertTiling", total=len(input)) as pbar:
             for i, block_scores in enumerate(bs_pipeline):
-                block_scores_smooth = self._smooth_scores(block_scores)
-                depth_scores = self._depth_calc(block_scores_smooth)
-                predictions = self._identify_boundaries(depth_scores)
-                with open(input[i], 'r', encoding='utf-8') as f:
-                    true_text = f.read()
-                ground_truth = generate_boundary_list(clean_text(true_text, mark_sections=True, from_wiki=from_wiki))
-                try:
-                    pk_, wd_, acc_ = compute_metrics(predictions, ground_truth[1:], return_acc=True, quiet=quiet)
-                    pk.append(pk_)
-                    wd.append(wd_)
-                    acc.append(acc_)
-                except:
-                    pass
+                if block_scores.numel() != 0:
+                    block_scores_smooth = self._smooth_scores(block_scores)
+                    depth_scores = self._depth_calc(block_scores_smooth)
+                    predictions = self._identify_boundaries(depth_scores)
+                    with open(input[i], 'r', encoding='utf-8') as f:
+                        true_text = f.read()
+                    ground_truth = generate_boundary_list(clean_text(true_text, mark_sections=True, from_wiki=from_wiki))
+                    try:
+                        pk_, wd_, acc_ = compute_metrics(predictions, ground_truth[1:], return_acc=True, quiet=quiet)
+                        pk.append(pk_)
+                        wd.append(wd_)
+                        acc.append(acc_)
+                    except:
+                        pass
                 pbar.update(1)
         return pk, wd, acc
 
@@ -295,7 +296,10 @@ class BertTilingPipeline(TS_Pipeline):
         return model_inputs
 
     def _forward(self, input_tensors: Dict[str, torch.TensorType], k: int) -> torch.TensorType:
-        hidden_layer = self.model(**input_tensors, output_hidden_states=True).hidden_states[-2]
+        try:
+            hidden_layer = self.model(**input_tensors, output_hidden_states=True).hidden_states[-2]
+        except RuntimeError:
+            return torch.tensor([], device=self.device)
         pooling = torch.nn.AvgPool2d((input_tensors["input_ids"].shape[1], 1))
         features = pooling(hidden_layer).squeeze()
 

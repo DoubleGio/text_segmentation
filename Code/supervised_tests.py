@@ -1,12 +1,13 @@
 import os, utils, argparse
 import pandas as pd
 import numpy as np
+from typing import Optional
 from textseg import TextSeg
 from textseg2 import TextSeg2
 from transformer2 import Transformer2
 from tqdm import tqdm
 
-def main(bs: int, nw: int, n: int):
+def main(bs: int, nw: int, n: Optional[int] = None):
     datasets = {
         'ENWiki': {"loc": utils.ENWIKI_LOC, "checkpoints": ["ENWiki_Jun21_1358", "ENWiki_Jun26_1851", "ENWiki_Jul05_0952"]},
         'NLWiki': {"loc": utils.NLWIKI_LOC, "checkpoints": ["NLWiki_Jun21_1937", "NLWiki_Jun28_1745", "NLWiki_Jul06_1223"]},
@@ -41,6 +42,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--bs', type=int, default=2) # TODO: Fix for batch size = 1
     parser.add_argument('--nw', type=int, default=0)
-    parser.add_argument('--n', type=int, default=np.inf)
+    parser.add_argument('--n', type=int)
     args = parser.parse_args()
     main(args.bs, args.nw, args.n)

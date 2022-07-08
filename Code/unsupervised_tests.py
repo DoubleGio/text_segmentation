@@ -2,6 +2,8 @@ import utils, os, argparse, gc
 import pandas as pd
 import numpy as np
 import multiprocessing as mp
+from torch.cuda import empty_cache
+from typing import Optional
 from tqdm import tqdm
 from texttiling import TextTiling
 from graphseg import run_graphseg
@@ -21,7 +23,7 @@ def tt_multi(path):
     except:
         return None
 
-def main(n: int):
+def main(n: Optional[int] = None):
     """
     w: pseudosentence length (approximate avg. sentence length)
     k: block comparison size (approximate avg. section size)
@@ -48,30 +50,31 @@ def main(n: int):
             paths = utils.get_all_file_names(os.path.join(params['loc'], '0-999'))[:n]
             global from_wiki
             from_wiki = params['from_wiki']
-            # global tt
-            # tt = TextTiling(lang=params['lang'], w=params['w'], k=params['k'])
+            global tt
+            tt = TextTiling(lang=params['lang'], w=params['w'], k=params['k'])
 
-            # with mp.Pool(processes=4) as p:
-            #     with tqdm(desc="Processing TextTiling", total=len(paths), leave=False) as pbar2:
-            #         for tt_res in p.imap_unordered(tt_multi, paths):
-            #             if tt_res is not None:
-            #                 results.loc[dataset, 'TextTiling'].append(tt_res)
-            #             pbar2.update(1)
-            # gc.collect()
+            with mp.Pool(processes=4) as p:
+                with tqdm(desc="Processing TextTiling", total=len(paths), leave=False) as pbar2:
+                    for tt_res in p.imap_unordered(tt_multi, paths):
+                        if tt_res is not None:
+                            results.loc[dataset, 'TextTiling'].append(tt_res)
+                        pbar2.update(1)
+            gc.collect()
 
             bt = BertTiling(lang=params['lang'], k=params['k'], batch_size=1, num_workers=2)
             bt_res = bt.eval_multi(paths, from_wiki=params['from_wiki'])
+            empty_cache()
             results.loc[dataset, 'BertTiling'] = bt_res
             pbar.update(1)
 
     results_avg = results.applymap(np.mean, axis=1)
-    results_avg.to_csv('results_avg.csv')
+    results_avg.to_csv('unsupervised_tests.csv')
     print(results_avg)
 
 if __name__ == '__main__':
     # mp.set_start_method('spawn')
     parser = argparse.ArgumentParser()
-    parser.add_argument('--n', type=int, default=np.inf, help='Number of files to process')
+    parser.add_argument('--n', type=int, help='Number of files to process')
     args = parser.parse_args()
     main(n=args.n)
     

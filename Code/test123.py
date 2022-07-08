@@ -48,9 +48,10 @@ if __name__ == '__main__':
     # t1 = clean_text(text, from_wiki=True)
     # print(len(sent_tokenize(t1)))
 
-    # tt = BertTiling(lang='en')
+    tt = BertTiling(lang='nl', k=10, batch_size=1)
+    l = get_all_file_names('Datasets/NLWiki/data/0-999')
     # with open("text_segmentation/Datasets/ENWiki/data/188000-188999/2678587", 'r') as f:
     #     text = f.read()
-    # print(tt.evaluate(text, True))
+    print(tt.eval_multi(l[575:577], True))
 
-    l = Transformer2()
+

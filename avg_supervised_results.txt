@@ -1,0 +1,29 @@
+Inclusive:
+          Method Trained on ⇩             (Pk, Wd, acc)
+1        TextSeg       NLWiki  [0.4082, 0.4489, 0.9341]
+2        TextSeg       NLNews   [0.3154, 0.355, 0.9465]
+3        TextSeg     NLAuVi_N  [0.3631, 0.4144, 0.9275]
+4        TextSeg        MIXED  [0.2439, 0.3149, 0.9408]
+
+6       TextSeg2       NLWiki  [0.3556, 0.4192, 0.9363]
+7       TextSeg2       NLNews  [0.3048, 0.3472, 0.9474]
+8       TextSeg2     NLAuVi_N  [0.3467, 0.3904, 0.9327]
+
+11  Transformer2       NLWiki  [0.3003, 0.3137, 0.9455]
+12  Transformer2       NLNews  [0.2435, 0.2674, 0.9486]
+13  Transformer2     NLAuVi_N  [0.3225, 0.3306, 0.9389]
+14  Transformer2        MIXED   [0.4704, 0.6406, 0.567]
+Exclusive:
+1        TextSeg       NLWiki   [0.441, 0.4848, 0.9544]
+2        TextSeg       NLNews   [0.4578, 0.5094, 0.923]
+3        TextSeg     NLAuVi_N     [0.4732, 0.4888, 0.9]
+4        TextSeg        MIXED  [0.2439, 0.3149, 0.9408]
+
+6       TextSeg2       NLWiki  [0.3813, 0.4574, 0.9529]
+7       TextSeg2       NLNews  [0.4398, 0.4953, 0.9244]
+8       TextSeg2     NLAuVi_N  [0.4568, 0.4711, 0.9076]
+
+11  Transformer2       NLWiki  [0.3038, 0.3176, 0.9652]
+12  Transformer2       NLNews    [0.348, 0.379, 0.9264]
+13  Transformer2     NLAuVi_N   [0.3458, 0.3523, 0.917]
+14  Transformer2        MIXED   [0.4704, 0.6406, 0.567]

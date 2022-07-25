@@ -1,4 +1,4 @@
-import logging, argparse
+import logging, argparse, torch
 from models import create_TS2_model, supervised_cross_entropy
 from textseg import TextSeg
 from TS_Dataset import TS_Dataset2
@@ -8,16 +8,16 @@ import torch.nn.functional as F
 from sklearn.model_selection import train_test_split
 from torch.nn.utils.rnn import pack_sequence, pad_sequence
 from torch.utils.tensorboard import SummaryWriter
-from typing import Callable, List, Optional, Tuple, Dict, Any, Union, Type
+from typing import Callable, List, Optional, Tuple, Dict, Any, Union, Type, Generator
 from tqdm import tqdm
 import numpy as np
 from transformers import logging as tlogging
 from transformers import BertTokenizerFast, BertModel, BatchEncoding
 from gensim.models import KeyedVectors
 rng = np.random.default_rng()
-from utils import sent_tokenize_plus, get_all_file_names, sectioned_clean_text, compute_metrics, LoggingHandler, clean_text, word_tokenize
+from utils import SECTION_MARK, sent_tokenize_plus, get_all_file_names, sectioned_clean_text, compute_metrics, LoggingHandler, clean_text, word_tokenize
 
-W2V_NL_PATH = 'text_segmentation/Datasets/word2vec-nl-combined-160.txt' # Taken from https://github.com/clips/dutchembeddings
+W2V_NL_PATH = 'Datasets/word2vec-nl-combined-160.txt' # Taken from https://github.com/clips/dutchembeddings
 EARLY_STOP = 3
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 logger = logging.getLogger(__name__)
@@ -37,6 +37,8 @@ class TextSeg2(TextSeg):
             # 'bert-base-uncased' = EN
             # 'GroNLP/bert-base-dutch-cased' = NL
             self.load_data = self.load_pipeline(bert_name)
+        if kwargs.get('quiet', False):
+            logger.setLevel(logging.WARNING)
         super().__init__(**kwargs)
 
     def load_pipeline(self, bert_name: str) -> Callable:
@@ -110,6 +112,62 @@ class TextSeg2(TextSeg):
         model.load_state_dict(state['state_dict'])
         logger.info(f"Loaded model from {self.load_from}.")
         return self.test(model, threshold if threshold else state['threshold'], return_acc=True)
+
+    # Override
+    def segment_texts(self, texts: List[str], threshold: Optional[float] = None, from_wiki=False) -> Generator[str, None, None]:
+        """
+        Load a model and segment text(s).
+        """
+        if self.load_from is None:
+            raise ValueError("Can't segment without a load_from path.")
+        if texts is not None:
+            if self.language == 'nl':
+                bert_name = 'GroNLP/bert-base-dutch-cased'
+            else:
+                bert_name = 'bert-base-uncased'
+            bert_tokenizer = BertTokenizerFast.from_pretrained(bert_name)
+            bert_model = BertModel.from_pretrained(bert_name)
+            pipe = Textseg2Pipeline(TS_Dataset2.word2vec, bert_tokenizer, bert_model, device, 2, 0, from_wiki=from_wiki, labeled=False)
+            text_loader = pipe(texts)
+            logger.info(f"Loaded {len(text_loader)} texts.")
+
+        state = torch.load(self.load_from)
+        model = create_TS2_model(input_size=self.vec_size, set_device=device)
+        model.load_state_dict(state['state_dict'])
+        model.eval()
+        logger.info(f"Loaded model from {self.load_from}.")
+        if threshold is None:
+            threshold = state['threshold']
+        logger.info(f"Using threshold {threshold:.2}.")
+        del state
+
+        # segmented_texts = []
+        with tqdm(desc='Segmenting', total=len(text_loader), leave=False) as pbar:
+            with torch.inference_mode():
+                for bert_sents, sents, texts, doc_lengths in text_loader:
+                    if sents is None:
+                        # segmented_texts.append(None)
+                        pbar.update(text_loader.batch_size)
+                        continue
+                    if self.use_cuda:
+                        bert_sents, sents, doc_lengths = self.move_to_cuda(bert_sents, sents, doc_lengths)
+                    output, _ = model(sents, bert_sents, doc_lengths)
+                    del sents, bert_sents
+                    output_softmax = F.softmax(output, dim=1)
+
+                    predictions = (output_softmax[:, 1] > threshold).long()
+                    doc_start_idx = 0
+                    for doc_len in doc_lengths:
+                        segmented_text = f'{SECTION_MARK}\n'
+                        for i, sent in enumerate(texts[doc_start_idx:doc_start_idx+doc_len]):
+                            segmented_text += ' ' + sent
+                            if predictions[i] == 1 and i < doc_len-1:
+                                segmented_text += f'\n{SECTION_MARK}\n'
+                        doc_start_idx += doc_len
+                        # segmented_texts.append(segmented_text)
+                        yield segmented_text
+                        pbar.update(1)
+                    torch.cuda.empty_cache()
 
     # Override
     def train(self, model, optimizer, writer) -> None:
@@ -253,15 +311,21 @@ class Textseg2Pipeline(TS_Pipeline):
         self.word2vec = word2vec
         super().__init__(*args, **kwargs)
 
-    def _sanitize_parameters(self, from_wiki=False, max_sent_len=30, max_sec_len = 70, labeled = True) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    def _sanitize_parameters(
+        self,
+        from_wiki: Optional[bool] = None,
+        max_sent_len: Optional[int] = None,
+        max_sec_len: Optional[int] = None,
+        labeled: Optional[bool] = None
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         preprocess_params, forward_params = {}, {}
-        preprocess_params["from_wiki"] = from_wiki
-        preprocess_params["max_sent_len"] = max_sent_len
-        preprocess_params["max_sec_len"] = max_sec_len
-        preprocess_params["labeled"] = labeled
+        if from_wiki is not None: preprocess_params["from_wiki"] = from_wiki
+        if max_sent_len is not None: preprocess_params["max_sent_len"] = max_sent_len
+        if max_sec_len is not None: preprocess_params["max_sec_len"] = max_sec_len
+        if labeled is not None: preprocess_params["labeled"] = labeled
         return preprocess_params, forward_params
 
-    def preprocess(self, path: str, from_wiki: bool, max_sent_len: int, max_sec_len: int, labeled: bool) -> Tuple[Dict[str, torch.TensorType], torch.FloatTensor, np.ndarray]:
+    def preprocess(self, path: str, from_wiki = False, max_sent_len = 30, max_sec_len = 70, labeled = True) -> Tuple[Dict[str, torch.TensorType], torch.FloatTensor, np.ndarray]:
         with open(path, 'r', encoding='utf-8') as f:
             text = f.read()
         if labeled:
@@ -316,7 +380,7 @@ class Textseg2Pipeline(TS_Pipeline):
 
     def get_data_raw(self, text:str, from_wiki: bool, max_sent_len: int) -> Tuple[torch.FloatTensor, torch.FloatTensor, np.ndarray]:
         data = []
-        raw_text = np.array([])
+        raw_text = []
         text = clean_text(text, from_wiki=from_wiki)
         sentences = sent_tokenize_plus(text)
         for sentence in sentences:
@@ -325,7 +389,7 @@ class Textseg2Pipeline(TS_Pipeline):
                 sentence_emb = self.embed_words(sentence_words)
                 if len(sentence_emb) > 0:
                     data.append(sentence_emb)
-                    raw_text = np.append(raw_text, sentence)
+                    raw_text.append(sentence)
 
         if len(data) == 0:
             return None
@@ -338,7 +402,7 @@ class Textseg2Pipeline(TS_Pipeline):
             return_tensors='pt'
         )
         data = pad_sequence(data, batch_first=True) # (num_sents, max_sent_len, embed_dim)
-        return model_inputs, data, raw_text
+        return model_inputs, data, np.array(raw_text)
 
     def embed_words(self, words: List[str]) -> torch.FloatTensor:
         res = []

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-from typing import Any, Dict, List, Union, Tuple
-from utils import compute_metrics, sent_tokenize_plus, smooth, clean_text, generate_boundary_list
+from typing import Any, Dict, List, Generator, Tuple
+from utils import compute_metrics, sent_tokenize_plus, smooth, clean_text, generate_boundary_list, SECTION_MARK
 from transformers import RobertaConfig, RobertaTokenizerFast, RobertaModel
 from transformers import logging as tlogging
 from matplotlib import pyplot as plt
 from TS_Pipeline import TS_Pipeline
 from tqdm import tqdm
 import numpy as np
-import torch
+import torch, os
 
 PARALLEL_INFERENCE_INSTANCES = 20
 tlogging.set_verbosity_error()
@@ -62,7 +62,7 @@ class BertTiling:
     def eval_multi(self, input: List[str], from_wiki=False, quiet=True) -> Tuple[List[float], List[float], List[float]]:
         pk, wd, acc = [], [], []
         bs_pipeline = self.pipeline(input, from_wiki=from_wiki, path=True)
-        with tqdm(desc="Processing BertTiling", total=len(input)) as pbar:
+        with tqdm(desc="Processing BertTiling", total=len(input), leave=False) as pbar:
             for i, block_scores in enumerate(bs_pipeline):
                 if block_scores.numel() != 0:
                     block_scores_smooth = self._smooth_scores(block_scores)
@@ -80,6 +80,23 @@ class BertTiling:
                         pass
                 pbar.update(1)
         return pk, wd, acc
+
+    def segment_multi(self, input: List[str], from_wiki=False) -> Generator[str, None, None]:
+        bs_pipeline = self.pipeline(input, from_wiki=from_wiki, path=True, return_sents=True)
+        with tqdm(desc="Processing BertTiling", total=len(input), leave=False) as pbar:
+            for block_scores, sents, fname in bs_pipeline:
+                if block_scores.numel() != 0:
+                    block_scores_smooth = self._smooth_scores(block_scores)
+                    depth_scores = self._depth_calc(block_scores_smooth)
+                    predictions = self._identify_boundaries(depth_scores)
+                    text = SECTION_MARK + '\n'
+                    for sent, pred in zip(sents[1:], predictions):
+                        if pred == 1:
+                            text += sent + '\n' + SECTION_MARK + '\n'
+                        else:
+                            text += sent + ' '
+                    yield (text, fname)
+                pbar.update(1)
 
     def topic_segmentation_bert(self, input: str, from_wiki=False, return_all=False) -> List[int]:
         """
@@ -275,15 +292,17 @@ class BertTiling:
 
 class BertTilingPipeline(TS_Pipeline):
 
-    def _sanitize_parameters(self, from_wiki=False, path=False, k=15) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    def _sanitize_parameters(self, from_wiki=False, path=False, return_sents=False, k=15) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         preprocess_params, forward_params = {}, {}
         preprocess_params["from_wiki"] = from_wiki
         preprocess_params["path"] = path
+        preprocess_params["return_sents"] = return_sents
         forward_params["k"] = k
         return preprocess_params, forward_params
 
-    def preprocess(self, text: str, from_wiki: bool, path: bool) -> Dict[str, torch.TensorType]:
+    def preprocess(self, text: str, from_wiki: bool, path: bool, return_sents: bool) -> Dict[str, torch.TensorType]:
         if path:
+            fname = os.path.basename(text)
             with open(text, "r", encoding='utf-8') as f:
                 text = f.read()
         text = clean_text(text, from_wiki=from_wiki)
@@ -293,7 +312,7 @@ class BertTilingPipeline(TS_Pipeline):
             padding=True,
             return_tensors="pt",
         )
-        return model_inputs
+        return model_inputs if not return_sents else (model_inputs, sentences, fname)
 
     def _forward(self, input_tensors: Dict[str, torch.TensorType], k: int) -> torch.TensorType:
         try:

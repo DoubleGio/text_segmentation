@@ -82,10 +82,6 @@ class TextTiling(TextTilingTokenizer):
         ground_truth = generate_boundary_list(clean_text(text, mark_sections=True, from_wiki=from_wiki))
         return compute_metrics(predictions[1:], ground_truth[1:], return_acc=True, quiet=quiet)
     
-    def evaluate_batch(self, texts: List[str], batch_size: int, from_wiki=False, quiet=True) -> List[Tuple[float, float]]:
-        """Evaluate the texttiling algorithm on a list of texts, returns the Pk and Windiff scores."""
-        # return [self.evaluate(text, from_wiki=from_wiki, quiet=quiet) for text in texts]
-
     def tokenize(self, text: str, from_wiki=False, return_predictions=False) -> Union[Tuple[List[float], List[float], List[float], List[int]], List[str]]:
         """Return a tokenized copy of *text*, where each "token" represents a separate topic."""
 

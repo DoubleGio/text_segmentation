@@ -14,7 +14,7 @@ from tqdm import tqdm
 from datetime import datetime, timedelta
 import numpy as np
 rng = np.random.default_rng()
-from utils import get_all_file_names, compute_metrics, LoggingHandler, SECTION_MARK
+from utils import get_all_file_names, LoggingHandler, compute_metrics, SECTION_MARK, NLWIKI_LOC, NLNEWS_LOC, NLAUVI_LOC_N
 
 W2V_NL_PATH = 'Datasets/word2vec-nl-combined-160.txt' # Taken from https://github.com/clips/dutchembeddings
 EARLY_STOP = 3
@@ -40,7 +40,10 @@ class TextSeg:
         use_cuda = True,
         load_from: Optional[str] = None,
         subset = np.inf,
-    ) -> None:      
+        quiet = False,
+    ) -> None:
+        if quiet:
+            logger.setLevel(logging.WARNING)
         if num_workers > 0:
             if torch.multiprocessing.get_start_method() == 'spawn':
                 # Multiprocessing only works on Unix systems which support the fork() system call.
@@ -58,16 +61,19 @@ class TextSeg:
 
         self.init_dataset_class(language=language, word2vec_path=word2vec_path)
         if dataset_path:
-            if from_wiki is None:
-                from_wiki = "wiki" in dataset_path.lower()
-            self.load_data(
-                dataset_path=dataset_path,
-                from_wiki=from_wiki,
-                splits=splits,
-                batch_size=batch_size,
-                num_workers=num_workers,
-                subset=subset
-            )
+            if dataset_path.lower() == 'mixed':
+                self.load_mixed_data(splits, batch_size, num_workers)
+            else:
+                if from_wiki is None:
+                    from_wiki = "wiki" in dataset_path.lower()
+                self.load_data(
+                    dataset_path=dataset_path,
+                    from_wiki=from_wiki,
+                    splits=splits,
+                    batch_size=batch_size,
+                    num_workers=num_workers,
+                    subset=subset
+                )
         self.load_from = load_from
         self.current_epoch = 0
 
@@ -136,6 +142,40 @@ class TextSeg:
             logger.info(f"Subsets: train {self.sizes['train']}, validate {self.sizes['val']}, test {self.sizes['test']}")
         else:
             self.sizes = {'train': len(train_dataset), 'val': len(val_dataset), 'test': len(test_dataset)}
+
+    def load_mixed_data(
+        self,
+        splits: List[float],
+        batch_size: int,
+        num_workers: int,
+        subset = 100_000
+    ) -> None:
+        """
+        Load the right data and pretrained models from three different Dutch datasets.
+        """
+        dataset_class = self.get_dataset_class()
+        self.dataset_name = 'MIXED'
+        datasets = [NLWIKI_LOC, NLNEWS_LOC, NLAUVI_LOC_N]
+        amount = subset // len(datasets)
+        path_list = []
+        for dataset in datasets:
+            l = get_all_file_names('text_segmentation/' + dataset)
+            path_list += l[:amount]
+        path_list.append(l[-1]) # To make it 100_000
+
+        # Split and shuffle the data
+        train_paths, test_paths = train_test_split(path_list, test_size=1-splits[0])
+        val_paths, test_paths = train_test_split(test_paths, test_size=splits[1]/(splits[1]+splits[2]))
+        
+        train_dataset = dataset_class(np.array(train_paths), from_wiki=True)
+        val_dataset = dataset_class(np.array(val_paths), from_wiki=True)
+        test_dataset = dataset_class(np.array(test_paths), from_wiki=True)
+
+        self.train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=self.custom_collate, num_workers=num_workers, pin_memory=self.use_cuda)
+        self.val_loader = DataLoader(val_dataset, batch_size=batch_size, collate_fn=self.custom_collate, num_workers=num_workers, pin_memory=self.use_cuda)
+        self.test_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=self.custom_collate, num_workers=num_workers, pin_memory=self.use_cuda)
+        logger.info(f"Loaded {len(train_dataset)} training examples, {len(val_dataset)} validation examples, and {len(test_dataset)} test examples.")
+        self.sizes = {'train': len(train_dataset), 'val': len(val_dataset), 'test': len(test_dataset)}
 
     def initialize_run(self, resume=False, model_creator: Callable = create_TS_model):
         cname = self.__class__.__name__.lower()
@@ -239,7 +279,7 @@ class TextSeg:
         logger.info(f"Loaded model from {self.load_from}.")
         return self.test(model, threshold if threshold else state['threshold'], return_acc=True)
 
-    def segment_text(self, texts: List[str], threshold: Optional[float] = None, from_wiki=False) -> List[str]:
+    def segment_texts(self, texts: List[str], threshold: Optional[float] = None, from_wiki=False) -> Generator[str, None, None]:
         """
         Load a model and segment text(s).
         """
@@ -256,16 +296,16 @@ class TextSeg:
         del state
 
         text_data = TS_Dataset(np.array(texts), from_wiki, labeled=False)
-        text_loader = DataLoader(text_data, batch_size=4, collate_fn=self.custom_collate, num_workers=0, pin_memory=self.use_cuda)
+        text_loader = DataLoader(text_data, batch_size=2, collate_fn=self.custom_collate, num_workers=0, pin_memory=self.use_cuda)
         logger.info(f"Loaded {len(text_data)} texts.")
         del texts
 
-        segmented_texts = []
-        with tqdm(desc='Segmenting', total=len(text_loader.dataset)) as pbar:
+        # segmented_texts = []
+        with tqdm(desc='Segmenting', total=len(text_loader.dataset), leave=False) as pbar:
             with torch.inference_mode():
                 for sents, texts, doc_lengths in text_loader:
                     if sents is None:
-                        segmented_texts.append(None)
+                        # segmented_texts.append(None)
                         pbar.update(text_loader.batch_size)
                         continue
                     if self.use_cuda:
@@ -283,11 +323,11 @@ class TextSeg:
                             if predictions[i] == 1 and i < doc_len-1:
                                 segmented_text += f'\n{SECTION_MARK}\n'
                         doc_start_idx += doc_len
-                        segmented_texts.append(segmented_text)
+                        # segmented_texts.append(segmented_text)
+                        yield segmented_text
                         pbar.update(1)
                     torch.cuda.empty_cache()
-
-        return segmented_texts
+        # return segmented_texts
 
     def train(self, model, optimizer, writer) -> None:
         model.train()
@@ -315,7 +355,7 @@ class TextSeg:
 
             train_loss = total_loss.item() / self.sizes['train'] # Average loss per doc.
             # logger.info(f"Skipped {self.train_loader.dataset.skipped} docs.")
-        logger.info(f"Training Epoch {self.current_epoch + 1} --- Loss = {train_loss:.4}")
+        logger.info(f"Training Epoch {self.current_epoch} --- Loss = {train_loss:.4}")
         writer.add_scalar('Loss/train', train_loss, self.current_epoch)
 
     def validate(self, model, writer) -> Tuple[float, float, float]:
@@ -361,7 +401,7 @@ class TextSeg:
             if sum(avg_pk_wd) < sum(best_scores):
                 best_scores = avg_pk_wd
                 best_threshold = threshold
-        logger.info(f"Validation Epoch {self.current_epoch + 1} --- Loss = {val_loss:.4}, For threshold = {best_threshold:.4}, Pk = {best_scores[0]:.4}, windowdiff = {best_scores[1]:.4}")
+        logger.info(f"Validation Epoch {self.current_epoch} --- Loss = {val_loss:.4}, For threshold = {best_threshold:.4}, Pk = {best_scores[0]:.4}, windowdiff = {best_scores[1]:.4}")
         writer.add_scalar('Loss/val', val_loss, self.current_epoch)
         writer.add_scalar('pk_score/val', best_scores[0], self.current_epoch)
         writer.add_scalar('wd_score/val', best_scores[1], self.current_epoch)
@@ -394,14 +434,14 @@ class TextSeg:
                     torch.cuda.empty_cache()
 
         epoch_avg = np.mean(scores, axis=0) # (pk, windowdiff) average for this threshold, over all docs.
-        logger.info(f"Testing Epoch {self.current_epoch + 1} --- For threshold = {threshold:.4}, Pk = {epoch_avg[0]:.4}, windowdiff = {epoch_avg[1]:.4}")
+        logger.info(f"Testing Epoch {self.current_epoch} --- For threshold = {threshold:.4}, Pk = {epoch_avg[0]:.4}, windowdiff = {epoch_avg[1]:.4}")
         if writer:
             writer.add_scalar('pk_score/test', epoch_avg[0], self.current_epoch)
             writer.add_scalar('wd_score/test', epoch_avg[1], self.current_epoch)
         return (epoch_avg[0], epoch_avg[1], epoch_avg[2]) if return_acc else (epoch_avg[0], epoch_avg[1])
     
-
-    def remove_last(self, x: torch.Tensor, y: torch.LongTensor, lengths: torch.LongTensor) -> Tuple[torch.Tensor, torch.LongTensor, torch.LongTensor]:
+    @staticmethod
+    def remove_last(x: torch.Tensor, y: torch.LongTensor, lengths: torch.LongTensor) -> Tuple[torch.Tensor, torch.LongTensor, torch.LongTensor]:
         """For each document in the batch, remove the last sentence prediction/label (as it's unnecessary)."""
         x_adj = torch.tensor([], device=device)
         y_adj = torch.tensor([], dtype=torch.int, device=device)

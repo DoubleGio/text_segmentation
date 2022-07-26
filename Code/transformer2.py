@@ -31,7 +31,7 @@ from transformers import BatchEncoding, BertTokenizerFast, BertModel
 from transformers import logging as tlogging
 from TS_Pipeline import TS_Pipeline
 from models import create_T2_model
-from utils import compute_metrics, get_all_file_names, sectioned_clean_text, sent_tokenize_plus, LoggingHandler
+from utils import SECTION_MARK, compute_metrics, get_all_file_names, sectioned_clean_text, sent_tokenize_plus, LoggingHandler, NLWIKI_LOC, NLNEWS_LOC, NLAUVI_LOC_N
 
 EARLY_STOP = 3
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -54,7 +54,10 @@ class Transformer2:
         use_cuda = True,
         load_from: Optional[str] = None,
         subset: Optional[int] = None,
+        quiet = False,
     ) -> None:
+        if quiet:
+            logger.setLevel(logging.WARNING)
         if bert_name:
             bert_tokenizer = BertTokenizerFast.from_pretrained(bert_name)
             bert_model = BertModel.from_pretrained(bert_name)
@@ -82,9 +85,12 @@ class Transformer2:
             self.use_cuda = False if device_name == 'cpu' else True
         
         if dataset_path:
-            if from_wiki is None:
-                from_wiki = "wiki" in dataset_path.lower()
-            self.load_data(dataset_path, from_wiki, splits, batch_size, num_workers, bert_tokenizer, bert_model, subset)
+            if dataset_path.lower() == 'mixed':
+                self.load_mixed_data(splits, batch_size, num_workers, bert_tokenizer, bert_model)
+            else:
+                if from_wiki is None:
+                    from_wiki = "wiki" in dataset_path.lower()
+                self.load_data(dataset_path, from_wiki, splits, batch_size, num_workers, bert_tokenizer, bert_model, subset)
         self.load_from = load_from
         self.current_epoch = 0
 
@@ -117,6 +123,35 @@ class Transformer2:
             logger.info(f"Subsets: train {self.sizes['train']}, validate {self.sizes['val']}, test {self.sizes['test']}")
         else:
             self.sizes = {'train': len(self.train_loader), 'val': len(self.val_loader), 'test': len(self.test_loader)}
+
+    def load_mixed_data(
+        self,
+        splits: List[float],
+        batch_size: int,
+        num_workers: int,
+        bert_tokenizer,
+        bert_model,
+        subset = 100_000
+    ) -> None:
+        self.dataset_name = 'MIXED'
+        datasets = [NLWIKI_LOC, NLNEWS_LOC, NLAUVI_LOC_N]
+        amount = subset // len(datasets)
+        path_list = []
+        for dataset in datasets:
+            l = get_all_file_names('text_segmentation/' + dataset)
+            path_list += l[:amount]
+        path_list.append(l[-1]) # To make it 100_000
+
+        # Split and shuffle the data
+        train_paths, test_paths = train_test_split(path_list, test_size=1-splits[0])
+        val_paths, test_paths = train_test_split(test_paths, test_size=splits[1]/(splits[1]+splits[2]))
+
+        pipe = Transformer2Pipeline(bert_tokenizer, bert_model, device, batch_size, num_workers, from_wiki=True)
+        self.train_loader = pipe(train_paths)
+        self.val_loader = pipe(val_paths)
+        self.test_loader = pipe(test_paths)
+        logger.info(f"Loaded {len(self.train_loader)} training examples, {len(self.val_loader)} validation examples, and {len(self.test_loader)} test examples.")
+        self.sizes = {'train': len(self.train_loader), 'val': len(self.val_loader), 'test': len(self.test_loader)}
 
     def initialize_run(self, resume=False):
         cname = self.__class__.__name__.lower()
@@ -202,7 +237,6 @@ class Transformer2:
         from_wiki = False,
         batch_size = 8,
         num_workers = 4,
-        threshold: Optional[float] = None
     ) -> Tuple[float, float, float]:
         if self.load_from is None:
             raise ValueError("Can't test without a load_from path.")
@@ -221,6 +255,54 @@ class Transformer2:
         model.load_state_dict(state['state_dict'])
         logger.info(f"Loaded model from {self.load_from}.")
         return self.test(model, return_acc=True)
+
+    def segment_texts(self, texts: List[str], from_wiki=False) -> Generator[str, None, None]:
+        if self.load_from is None:
+            raise ValueError("Can't segment texts without a load_from path.")
+        if texts is not None:
+            if self.language == 'nl':
+                bert_name = 'GroNLP/bert-base-dutch-cased'
+            else:
+                bert_name = 'bert-base-uncased'
+            bert_tokenizer = BertTokenizerFast.from_pretrained(bert_name)
+            bert_model = BertModel.from_pretrained(bert_name)
+            pipe = Transformer2Pipeline(bert_tokenizer, bert_model, device, 1, 0, from_wiki=from_wiki, labeled=False)
+            text_loader = pipe(texts)
+            logger.info(f"Loaded {len(text_loader)} texts.")
+
+        state = torch.load(self.load_from)
+        model = create_T2_model(input_size=self.emb_size, set_device=device)
+        model.load_state_dict(state['state_dict'])
+        logger.info(f"Loaded model from {self.load_from}.")
+
+        with tqdm(desc='Segmenting', total=len(text_loader), leave=False) as pbar:
+            with torch.inference_mode():
+                for sent_embeddings, texts, doc_lengths in text_loader:
+                    if sent_embeddings is None:
+                        pbar.update(text_loader.batch_size)
+                        continue
+                    doc_lengths -= 1
+                    if self.use_cuda:
+                        sent_embeddings, doc_lengths = self.move_to_cuda(sent_embeddings, doc_lengths)
+                    output = model(sent_embeddings, doc_lengths)
+                    
+                    predictions = output.argmax(dim=1)
+                    doc_start_idx = 0
+                    for doc_len in doc_lengths:
+                        # segmented_text = f'{SECTION_MARK}\n'
+                        segmented_text = ''
+                        for i, sent in enumerate(texts[doc_start_idx:doc_start_idx+doc_len]):
+                            if predictions[i] == 1 and i < doc_len-1:
+                                segmented_text += f'\n{SECTION_MARK}\n' + sent
+                            else:
+                                segmented_text += ' ' + sent
+                        segmented_text += ' ' + texts[doc_len]
+                        doc_start_idx += doc_len + 1
+                        # segmented_texts.append(segmented_text)
+                        yield segmented_text
+                        pbar.update(1)
+                    torch.cuda.empty_cache()
+
 
     def train(self, model, optimizer, writer) -> None:
         model.train()
@@ -322,14 +404,21 @@ class Transformer2:
             yield t.to(device, non_blocking=True)
 
 class Transformer2Pipeline(TS_Pipeline):
-    def _sanitize_parameters(self, from_wiki=False, max_sent_len=30, max_text_len = 300) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    def _sanitize_parameters(
+        self, 
+        from_wiki: Optional[bool] = None,
+        max_sent_len: Optional[int] = None,
+        max_text_len: Optional[int] = None,
+        labeled: Optional[bool] = None
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         preprocess_params, forward_params = {}, {}
-        preprocess_params["from_wiki"] = from_wiki
-        preprocess_params["max_sent_len"] = max_sent_len
-        preprocess_params["max_text_len"] = max_text_len
+        if from_wiki is not None: preprocess_params['from_wiki'] = from_wiki
+        if max_sent_len is not None: preprocess_params['max_sent_len'] = max_sent_len
+        if max_text_len is not None: preprocess_params['max_text_len'] = max_text_len
+        if labeled is not None: preprocess_params['labeled'] = labeled
         return preprocess_params, forward_params
 
-    def preprocess(self, path: str, from_wiki: bool, max_sent_len: int, max_text_len: int) -> Tuple[Dict[str, torch.TensorType], np.ndarray]:
+    def preprocess(self, path: str, from_wiki = False, max_sent_len = 30, max_text_len = 300, labeled = True) -> Tuple[Dict[str, torch.TensorType], np.ndarray]:
         with open(path, 'r', encoding='utf-8') as f:
             text = f.read()
         sections = sectioned_clean_text(text, from_wiki=from_wiki)
@@ -357,7 +446,7 @@ class Transformer2Pipeline(TS_Pipeline):
             max_length=max_sent_len * 2, # *2 because of pairwise
             return_tensors='pt'
         )
-        return model_inputs, targets[:-1]
+        return (model_inputs, targets[:-1]) if labeled else (model_inputs, sentences)
 
     def _forward(self, input_tensors: Dict[str, torch.TensorType]) -> torch.TensorType:
         """Returns the [CLS] token."""

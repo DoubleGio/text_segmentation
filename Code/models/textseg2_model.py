@@ -86,7 +86,7 @@ class TS2_Model(nn.Module):
 
     def compute_sentences_similarity(self, X, sent_i, win_size):
         """
-        FIXME: the calc of z is weird, unlike the paper.
+        FIXME: Weird, unclear calculations.
         """
         X1 = X.unsqueeze(0)
         Y1 = X.unsqueeze(1)
@@ -101,8 +101,8 @@ class TS2_Model(nn.Module):
             a_norm = a / a.norm(dim=1)[:, None]
             b = Z[sent_i,:,int(Z.size()[-1]/2):]
             b_norm = b / b.norm(dim=1)[:, None]
-            z = torch.cat([Z[sent_i,:], torch.sigmoid(torch.diag(torch.mm(a_norm,b_norm.transpose(0,1)))).unsqueeze(-1)],-1)
-            attn_weight = F.softmax(self.self_attn(z), dim=0).permute(1,0)
+            sim = torch.cat([Z[sent_i,:], torch.sigmoid(torch.diag(torch.mm(a_norm,b_norm.transpose(0,1)))).unsqueeze(-1)],-1)
+            attn_weight = F.softmax(self.self_attn(sim), dim=0).permute(1,0)
 
             output = attn_weight.matmul(Z[sent_i,:,0:int(Z.size()[-1]/2)])
         else:
@@ -110,8 +110,8 @@ class TS2_Model(nn.Module):
             a_norm = a / a.norm(dim=1)[:, None]
             b = Z[win_size,:,int(Z.size()[-1]/2):]
             b_norm = b / b.norm(dim=1)[:, None]
-            z = torch.cat([Z[win_size,:], torch.sigmoid(torch.diag(torch.mm(a_norm,b_norm.transpose(0,1)))).unsqueeze(-1)],-1)
-            attn_weight = F.softmax(self.self_attn(z), dim=0).permute(1,0)
+            sim = torch.cat([Z[win_size,:], torch.sigmoid(torch.diag(torch.mm(a_norm,b_norm.transpose(0,1)))).unsqueeze(-1)],-1)
+            attn_weight = F.softmax(self.self_attn(sim), dim=0).permute(1,0)
 
             output = attn_weight.matmul(Z[win_size,:,0:int(Z.size()[-1]/2)])
 

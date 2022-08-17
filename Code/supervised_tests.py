@@ -61,6 +61,33 @@ def main(bs: int, nw: int, n: Optional[int] = None):
     results_pretty = tabulate(results.reset_index(), headers='keys', tablefmt='github')
     print(results_pretty)
 
+def t2(bs: int, nw: int, n: Optional[int] = None):
+    SAVE_AS = 't2_tests'
+    methods = {
+        'NLAuVi_N': {"checkpoint": "NLAuVi_Jul07_1011"},
+        'NLAuVi_C': {"checkpoint": "NLAuVi_Jul08_1155"},
+    }
+    nl_datasets = list(DATASETS.keys())[1:]
+    results = pd.DataFrame(np.nan, index=methods.keys(), columns=DATASETS.keys())
+    with tqdm(total=len(methods.keys()), leave=False) as pbar:
+        for dataset, params in methods.items():    # for each method 
+            pbar.set_description(f'    Trained on {dataset}')
+            ts = Transformer2(language='nl', load_from=os.path.join('../checkpoints', 'transformer2', params['checkpoint'], 'best_model'), quiet=True)
+            res_dict = dict((a, [0,0,0]) for a in nl_datasets) # [Pk, Wd, Acc]
+            with tqdm(total=len(nl_datasets), leave=False) as pbar2: # for each dataset
+                for nl_dataset in nl_datasets:
+                    paths = utils.get_all_file_names(os.path.join(DATASETS[nl_dataset]['loc'], '0-999'))[:n]
+                    fw = 'Wiki' in nl_dataset
+                    res_dict[nl_dataset] = np.around(ts.run_test(paths, batch_size=bs, num_workers=nw, from_wiki=fw), decimals=4)
+                    pbar2.update(1)
+            results.loc[dataset] = res_dict
+            pbar.update(1)
+    results.rename_axis(['Trained on ⇩'], inplace=True)
+    results.to_csv(f'{SAVE_AS}.csv')
+    results.reset_index().to_markdown(f'{SAVE_AS}.md')
+    results_pretty = tabulate(results.reset_index(), headers='keys', tablefmt='github')
+    print(results_pretty)
+
 def mixed(bs: int, nw: int, n: Optional[int] = None):
     SAVE_AS = 'mixed_tests'
     methods = ['TextSeg', 'Transformer2']
@@ -105,13 +132,15 @@ if __name__ == '__main__':
     parser.add_argument('--nw', type=int, default=0)
     parser.add_argument('--n', type=int)
     parser.add_argument('--mixed', action='store_true', help='Test mixed model')
+    parser.add_argument('--t2', action='store_true', help='Test normal vs. concat')
     parser.add_argument('--get_avgs', action='store_true')
     parser.add_argument('--texts', action='store_true', help='Output texts')
     args = parser.parse_args()
 
     if args.mixed:
         mixed(args.bs, args.nw, args.n)
-
+    elif args.t2:
+        t2(args.bs, args.nw, args.n)
     elif args.get_avgs:
         df = pd.read_csv(f'supervised_tests.csv')
         df1 = df.iloc[1:, 3:].applymap(lambda x: np.array([float(y) for y in list(filter(None, x[1:-1].split(' ')))]), 'ignore')
@@ -123,10 +152,8 @@ if __name__ == '__main__':
         print(pd.concat([df.iloc[1:, 0:2], avg1.apply(np.around, decimals=4)], axis=1).dropna())
         print('Exclusive:')
         print(pd.concat([df.iloc[1:, 0:2], avg2.apply(np.around, decimals=4)], axis=1).dropna())
-
     elif args.texts:
         write_texts(args.n)
-
     else:
         main(args.bs, args.nw, args.n)
 

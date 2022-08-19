@@ -38,7 +38,7 @@ def main(bs: int, nw: int, n: Optional[int] = None):
                     if dataset == 'ENWiki':
                         ts = eval(method_name)(language='en', load_from=os.path.join('../checkpoints', method_name.lower(), params['checkpoints'][i], 'best_model'), quiet=True)
                         paths = utils.get_all_file_names(os.path.join(params['loc'], '0-999'))[:n]
-                        test_dict = {'ENWiki': np.around(ts.run_test(paths, batch_size=bs, num_workers=nw, from_wiki=True), decimals=4)}
+                        test_dict = {'ENWiki': np.around(ts.run_test(paths, batch_size=bs, num_workers=nw, from_wiki=True), decimals=DECIMALS)}
                         res.loc[dataset] = test_dict
                     else:
                         test_dict = dict((a, [0,0,0]) for a in list(DATASETS.keys())[1:]) # [Pk, Wd, Acc]
@@ -48,7 +48,7 @@ def main(bs: int, nw: int, n: Optional[int] = None):
                             for nl_dataset, params_ in list(DATASETS.items())[1:]:
                                 paths = utils.get_all_file_names(os.path.join(params_['loc'], '0-999'))[:n]
                                 fw = 'Wiki' in nl_dataset
-                                test_dict[nl_dataset] = np.around(ts.run_test(paths, batch_size=bs, num_workers=nw, from_wiki=fw), decimals=4)
+                                test_dict[nl_dataset] = np.around(ts.run_test(paths, batch_size=bs, num_workers=nw, from_wiki=fw), decimals=DECIMALS)
                                 pbar3.update(1)
                         res.loc[dataset] = test_dict
                     pbar2.update(1)
@@ -78,7 +78,7 @@ def t2(bs: int, nw: int, n: Optional[int] = None):
                 for nl_dataset in nl_datasets:
                     paths = utils.get_all_file_names(os.path.join(DATASETS[nl_dataset]['loc'], '0-999'))[:n]
                     fw = 'Wiki' in nl_dataset
-                    res_dict[nl_dataset] = np.around(ts.run_test(paths, batch_size=bs, num_workers=nw, from_wiki=fw), decimals=4)
+                    res_dict[nl_dataset] = np.around(ts.run_test(paths, batch_size=bs, num_workers=nw, from_wiki=fw), decimals=DECIMALS)
                     pbar2.update(1)
             results.loc[dataset] = res_dict
             pbar.update(1)
@@ -101,7 +101,7 @@ def mixed(bs: int, nw: int, n: Optional[int] = None):
                 for dataset, params in list(DATASETS.items())[1:]:    # for each NL dataset
                     paths = utils.get_all_file_names(os.path.join(params['loc'], '0-999'))[:n]
                     fw = 'Wiki' in dataset
-                    res_dict[dataset] = np.around(ts.run_test(paths, batch_size=bs, num_workers=nw, from_wiki=fw), decimals=4)
+                    res_dict[dataset] = np.around(ts.run_test(paths, batch_size=bs, num_workers=nw, from_wiki=fw), decimals=DECIMALS)
                     pbar2.update(1)
             results.loc[method_name] = res_dict
             pbar.update(1)
@@ -131,11 +131,15 @@ if __name__ == '__main__':
     parser.add_argument('--bs', type=int, default=2) # FIXME: does not work for batch_size = 1
     parser.add_argument('--nw', type=int, default=0)
     parser.add_argument('--n', type=int)
+    parser.add_argument('--decimals', type=int, default=4)
     parser.add_argument('--mixed', action='store_true', help='Test mixed model')
     parser.add_argument('--t2', action='store_true', help='Test normal vs. concat')
     parser.add_argument('--get_avgs', action='store_true')
     parser.add_argument('--texts', action='store_true', help='Output texts')
     args = parser.parse_args()
+
+    global DECIMALS
+    DECIMALS = args.decimals
 
     if args.mixed:
         mixed(args.bs, args.nw, args.n)

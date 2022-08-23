@@ -8,10 +8,6 @@ from transformer2 import Transformer2
 from tqdm import tqdm
 from tabulate import tabulate
 
-# SAVE_AS = 'supervised_tests'
-# SAVE_AS = 'mixed_tests'
-# SAVE_AS = 't2_tests'
-
 DATASETS = {
     'ENWiki': {"loc": utils.ENWIKI_LOC, "checkpoints": ["ENWiki_Jun21_1358", "ENWiki_Jun26_1851", "ENWiki_Jul05_0952"]},
     'NLWiki': {"loc": utils.NLWIKI_LOC, "checkpoints": ["NLWiki_Jun21_1937", "NLWiki_Jun28_0946", "NLWiki_Jul06_1223"]},
@@ -26,7 +22,8 @@ METHODS = [
 ]
 
 def main(bs: int, nw: int, n: Optional[int] = None):
-    SAVE_AS = 'supervised_tests'
+    """Main supervised tests."""
+    save_as = '../Results/supervised_tests'
     results = []
     with tqdm(total=len(METHODS)) as pbar:
         for i, method_name in enumerate(METHODS):   # for each method
@@ -56,13 +53,14 @@ def main(bs: int, nw: int, n: Optional[int] = None):
             results.append(res)
     results = pd.concat(results, keys=METHODS)
     results.rename_axis(['Method', 'Trained on ⇩'], inplace=True)
-    results.to_csv(f'{SAVE_AS}.csv')
-    results.reset_index().to_markdown(f'{SAVE_AS}.md')
+    results.to_csv(f'{save_as}.csv')
+    results.reset_index().to_markdown(f'{save_as}.md')
     results_pretty = tabulate(results.reset_index(), headers='keys', tablefmt='github')
     print(results_pretty)
 
 def t2(bs: int, nw: int, n: Optional[int] = None):
-    SAVE_AS = 't2_tests'
+    """Testing to compare NLAuVi normal vs. concatenated."""
+    save_as = '../Results/t2_tests'
     methods = {
         'NLAuVi_N': {"checkpoint": "NLAuVi_Jul07_1011"},
         'NLAuVi_C': {"checkpoint": "NLAuVi_Jul08_1155"},
@@ -83,13 +81,14 @@ def t2(bs: int, nw: int, n: Optional[int] = None):
             results.loc[dataset] = res_dict
             pbar.update(1)
     results.rename_axis(['Trained on ⇩'], inplace=True)
-    results.to_csv(f'{SAVE_AS}.csv')
-    results.reset_index().to_markdown(f'{SAVE_AS}.md')
+    results.to_csv(f'{save_as}.csv')
+    results.reset_index().to_markdown(f'{save_as}.md')
     results_pretty = tabulate(results.reset_index(), headers='keys', tablefmt='github')
     print(results_pretty)
 
 def mixed(bs: int, nw: int, n: Optional[int] = None):
-    SAVE_AS = 'mixed_tests'
+    """Testing models trained on the MIXED dataset."""
+    save_as = '../Results/mixed_tests'
     methods = ['TextSeg', 'Transformer2']
     results = pd.DataFrame(np.nan, index=methods, columns=list(DATASETS.keys())[1:])
     with tqdm(total=len(methods)) as pbar:
@@ -105,8 +104,8 @@ def mixed(bs: int, nw: int, n: Optional[int] = None):
                     pbar2.update(1)
             results.loc[method_name] = res_dict
             pbar.update(1)
-    results.to_csv(f'{SAVE_AS}.csv')
-    results.reset_index().to_markdown(f'{SAVE_AS}.md')
+    results.to_csv(f'{save_as}.csv')
+    results.reset_index().to_markdown(f'{save_as}.md')
     results_pretty = tabulate(results.reset_index(), headers='keys', tablefmt='github')
     print(results_pretty)
 
@@ -128,9 +127,9 @@ def write_texts(n: Optional[int] = None):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--bs', type=int, default=2) # FIXME: does not work for batch_size = 1
-    parser.add_argument('--nw', type=int, default=0)
-    parser.add_argument('--n', type=int)
+    parser.add_argument('--bs', type=int, default=2, help="Batch size") # FIXME: does not work for batch_size = 1
+    parser.add_argument('--nw', type=int, default=0, help="Number of workers")
+    parser.add_argument('--n', type=int, help="Size of the test set")
     parser.add_argument('--decimals', type=int, default=4)
     parser.add_argument('--mixed', action='store_true', help='Test mixed model')
     parser.add_argument('--t2', action='store_true', help='Test normal vs. concat')

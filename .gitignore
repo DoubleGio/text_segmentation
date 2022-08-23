@@ -8,6 +8,7 @@ planning.*
 .vscode
 checkpoints
 extract_rtvm.ipynb
+text_segmenter.ipynb
 *.svg
 
 # Byte-compiled / optimized / DLL files

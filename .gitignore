@@ -7,7 +7,7 @@ Datasets/word2vec-nl-combined-160.txt
 planning.*
 .vscode
 checkpoints
-extract_rtvm.ipynb
+extract_rtvm
 *.svg
 
 # Byte-compiled / optimized / DLL files

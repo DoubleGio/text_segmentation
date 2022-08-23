@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from torch.nn.utils.rnn import pad_packed_sequence, PackedSequence
-from typing import Optional, List
+from typing import Optional
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -23,7 +23,7 @@ class SentenceEncodingRNN(nn.Module):
 
     def forward(self, x):
         batch_size = x.batch_sizes[0]
-        packed_output, _ = self.lstm(x, zero_state(self, batch_size))
+        packed_output, _ = self.lstm(x, self.zero_state(self, batch_size))
         padded_output, lengths = pad_packed_sequence(packed_output, batch_first=True) # (batch, max_sentence_length, hidden * 2) 
 
         maxes = torch.zeros(batch_size, padded_output.size(2), device=device)
@@ -31,6 +31,11 @@ class SentenceEncodingRNN(nn.Module):
             maxes[i, :] = torch.max(padded_output[i, :lengths[i], :], 0)[0]
 
         return maxes
+
+    @staticmethod
+    def zero_state(module, batch_size):
+        """ * 2 is for the two directions """
+        return torch.zeros(module.num_layers * 2, batch_size, module.hidden, device=device), torch.zeros(module.num_layers * 2, batch_size, module.hidden, device=device)
 
 
 class TS_Model(nn.Module):
@@ -46,8 +51,7 @@ class TS_Model(nn.Module):
                                      dropout=0,
                                      bidirectional=True)
 
-        # We have two labels
-        self.h2s = nn.Linear(hidden * 2, 2)
+        self.h2s = nn.Linear(hidden * 2, 2) # We have two labels
         self.num_layers = num_layers
         self.hidden = hidden
 
@@ -57,10 +61,6 @@ class TS_Model(nn.Module):
         res = self.h2s(encoded_sentences)
         return res
 
-
-def zero_state(module, batch_size):
-    # * 2 is for the two directions
-    return torch.zeros(module.num_layers * 2, batch_size, module.hidden, device=device), torch.zeros(module.num_layers * 2, batch_size, module.hidden, device=device)
 
 def create_TS_model(input_size: int, use_cuda=True, set_device: Optional[torch.device] = None) -> TS_Model:
     """Create a new TS_Model instance. Uses cuda if available, unless use_cuda=False."""

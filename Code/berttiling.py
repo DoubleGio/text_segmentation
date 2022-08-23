@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 from typing import Any, Dict, List, Generator, Tuple
 from utils import compute_metrics, sent_tokenize_plus, smooth, clean_text, generate_boundary_list, SECTION_MARK
 from transformers import RobertaConfig, RobertaTokenizerFast, RobertaModel

@@ -1,13 +1,3 @@
-"""
-2.1. Create a transformer model:
-    >>> y_seg = Sigmoid(Linear2(TransformerΘ(S)))
-    >>> Θ = {'nhead': 24, 'num_encoder_layers': 5, 'dim_feedforward': 1024}
-2.2. Create a loss function:
-    >>> loss_fn = binary cross entropy loss
-'For the segmentation predictions, 70% of the inner sentences were randomly masked,
-while all the begin sentences were not masked in order to address the imbalance class problem.'
-basically, remove 70% of the non-boundary sentences for training.
-"""
 import math
 from typing import Optional, Tuple
 import torch
@@ -56,10 +46,7 @@ class T2_Model(nn.Module):
             encoder_layer,
             num_layers=5,
         )
-        # self.out = nn.Sequential(
-        #     nn.Linear(d_model, 2),
-        #     nn.Sigmoid(),
-        # )
+
         self.out = nn.Linear(d_model, 2)
         self.d_model = d_model
 
@@ -67,8 +54,11 @@ class T2_Model(nn.Module):
         sent_emb = sent_emb * math.sqrt(self.d_model) # scale the embedding (is done in the 'Attention is all you need' paper for no clear reason)
         sent_emb, key_mask = self.batchify(sent_emb, doc_lengths, targets) # (sentences, d_model) -> (batch_size, max_sentence_length, d_model)
         sent_emb = self.pos_encoder(sent_emb)
+
+        # TODO: Mask out 70% from the non-boundary sentences.
         sent_emb = self.transformer_encoder(sent_emb, mask=self.generate_square_subsequent_mask(sent_emb.shape[1]), src_key_padding_mask=key_mask)
         # sent_emb = self.transformer_encoder(sent_emb, mask=None, src_key_padding_mask=key_mask)
+
         sent_emb = self.out(sent_emb)
         return self.unbatchify(sent_emb, doc_lengths)
 
@@ -83,14 +73,19 @@ class T2_Model(nn.Module):
     @staticmethod
     def batchify(data: torch.TensorType, doc_lengths: torch.TensorType, targets: Optional[torch.TensorType] = None) -> Tuple[torch.TensorType, torch.TensorType]:
         """
+        Create padded batches of the data and a mask for the padded positions.
+        Additionally, may mask out 70% of the non-boundary sentences if targets is provided.
+        
+        TODO: Mask out 70% from the non-boundary sentences correctly. Useful links:
+        https://discuss.pytorch.org/t/how-to-add-padding-mask-to-nn-transformerencoder-module/63390/3
+        https://stackoverflow.com/questions/62170439/difference-between-src-mask-and-src-key-padding-mask
+        
         Args:
             data: Tensor, shape [num sents, embedding_dim]
             doc_lengths: Tensor, shape [batch_size]
         Returns:
             Tensor, shape [batch_size, num_sents, embedding_dim]
         """
-        # https://discuss.pytorch.org/t/how-to-add-padding-mask-to-nn-transformerencoder-module/63390/3
-        # https://stackoverflow.com/questions/62170439/difference-between-src-mask-and-src-key-padding-mask
         max_len = torch.max(doc_lengths)
         docs = []
         masks = []
@@ -98,11 +93,16 @@ class T2_Model(nn.Module):
         for doc_len in doc_lengths:
             # Pad the sequences to max_len --- pad=(left, right, top, bottom)
             docs.append(nn.functional.pad(data[cur_i: cur_i + doc_len], pad=(0, 0, 0, max_len - doc_len)))
+
+            # FIXME: This mask does not improve things.
             if targets is not None:
-                m = (torch.rand(doc_len, device=device) > 0.3) * ~targets[cur_i: cur_i + doc_len].bool() # Mask out 70% of the non-boundary sentences
+                m = (torch.rand(doc_len, device=device) > 0.3) * ~targets[cur_i: cur_i + doc_len].bool() # Mask out 70% of the non-boundary sentences (?)
                 m = torch.cat([m, torch.ones(max_len - doc_len, device=device, dtype=bool)], dim=0)
+
+            # Basic mask for the padded positions.
             else:
                 m = torch.cat([torch.zeros(doc_len, device=device, dtype=bool), torch.ones(max_len - doc_len, device=device, dtype=bool)])
+
             masks.append(m)
             cur_i += doc_len
         return torch.stack(docs), torch.stack(masks)
@@ -120,7 +120,6 @@ class T2_Model(nn.Module):
         for i, doc_len in enumerate(doc_lengths):
             docs.append(data[i, :doc_len])
         return torch.cat(docs, dim=0)
-
 
 
 def create_T2_model(input_size: int, use_cuda=True, set_device: Optional[torch.device] = None) -> T2_Model:

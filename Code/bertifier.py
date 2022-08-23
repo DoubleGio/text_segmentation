@@ -7,6 +7,7 @@ from utils import sent_tokenize_plus, clean_text, get_all_file_names, yield_all_
 """
 For each document in each dataset, create and save a BERT embedding.
 This follows the same procedure as the bert-as-service module (which was originally used).
+Use with caution, as the embeddings are quite large.
 """
 
 tlogging.set_verbosity_error()

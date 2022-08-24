@@ -16,7 +16,6 @@ class BertTiling:
     """
     Updated implementation of https://github.com/gdamaskinos/unsupervised_topic_segmentation.
     """
-
     def __init__(
         self,
         k=15,

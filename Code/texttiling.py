@@ -3,7 +3,7 @@ import multiprocessing as mp
 import numpy as np
 from typing import List, Tuple, Union, Callable
 from matplotlib import pyplot as plt
-from nltk.tokenize.texttiling import TextTilingTokenizer, BLOCK_COMPARISON, VOCABULARY_INTRODUCTION, LC, HC, DEFAULT_SMOOTHING, TokenTableField, TokenSequence
+from nltk.tokenize.texttiling import TextTilingTokenizer, BLOCK_COMPARISON, VOCABULARY_INTRODUCTION, LC, HC, DEFAULT_SMOOTHING, TokenSequence
 from nltk.corpus import stopwords
 from utils import sent_tokenize_plus, clean_text, smooth, compute_metrics, generate_boundary_list, SECTION_MARK
 nltk.download('stopwords', quiet=True)
@@ -12,7 +12,7 @@ class TextTiling(TextTilingTokenizer):
     """
     Extension of nltk.texttiling module.
     ====
-    (includes some fixes)
+    (includes some fixes/improvements)
 
     Tokenize a document into topical sections using the TextTiling algorithm.
     This algorithm detects subtopic shifts based on the analysis of lexical
@@ -158,9 +158,7 @@ class TextTiling(TextTilingTokenizer):
             return segmented_text
 
     def _depth_scores(self, scores) -> List[float]:
-        """Calculates the depth of each gap, i.e. the average difference
-        between the left and right peaks and the gap's score"""
-
+        """Calculates the depth of each gap, i.e. the average difference between the left and right peaks and the gap's score"""
         depth_scores = [0] * len(scores)
 
         for i, gapscore in enumerate(scores):
@@ -193,9 +191,7 @@ class TextTiling(TextTilingTokenizer):
         ]
 
     def _identify_boundaries(self, depth_scores):
-        """Identifies boundaries at the peaks of similarity score
-        differences"""
-
+        """Identifies boundaries at the peaks of similarity score differences"""
         boundaries = [0 for _ in depth_scores]
 
         avg = sum(depth_scores) / len(depth_scores)
@@ -242,7 +238,7 @@ class TextTiling(TextTilingTokenizer):
         return normalized_boundaries
 
     def _smooth_scores(self, gap_scores):
-        "Wraps the smooth function from the SciPy Cookbook"
+        """Wraps the smooth function from the SciPy Cookbook"""
         smoothed_scores = np.array(gap_scores[:])
         for _ in range(self.smoothing_passes):
             smoothed_scores = smooth(smoothed_scores, window_len=self.smoothing_width + 1)

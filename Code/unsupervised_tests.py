@@ -6,7 +6,7 @@ from torch.cuda import empty_cache
 from typing import Optional
 from tqdm import tqdm
 from texttiling import TextTiling
-from graphseg import run_graphseg
+from graphseg import run_graphseg # Running GraphSeg separately is recommended.
 from berttiling import BertTiling
 rng = np.random.default_rng()
 

@@ -27,7 +27,6 @@ class TextSeg:
     """
     Updated implementation of https://github.com/koomri/text-segmentation.
     """
-
     def __init__(
         self,
         language: Optional[str] = None,
@@ -178,6 +177,20 @@ class TextSeg:
         self.sizes = {'train': len(train_dataset), 'val': len(val_dataset), 'test': len(test_dataset)}
 
     def initialize_run(self, resume=False, model_creator: Callable = create_TS_model):
+        """
+        Args:
+            resume: Whether to resume a previous run.
+            model_creator: Function that returns an instance of the model.
+
+        Returns:
+            now: The current date and time (e.g. 'Jan01_2359').
+            writer: The Tensorboard writer.
+            checkpoint_path: Path to the checkpoints folder.
+            model: The model.
+            optimizer: The optimizer.
+            best_val_scores: The best validation scores.
+            non_improvement_count: The number of epochs without improvement (for early stopping).
+        """
         cname = self.__class__.__name__.lower()
         if resume:
             if self.load_from is None:
@@ -212,9 +225,6 @@ class TextSeg:
         return now, writer, checkpoint_path, model, optimizer, best_val_scores, non_improvement_count
 
     def run(self, epochs=10, resume=False) -> Tuple[float, float]:
-        """
-        Start/Resume training.
-        """
         now, writer, checkpoint_path, model, optimizer, best_val_scores, non_improvement_count = self.initialize_run(resume)
         with tqdm(desc='Epochs', total=epochs, initial=self.current_epoch) as pbar:
             for epoch in range(self.current_epoch, epochs):
@@ -281,7 +291,7 @@ class TextSeg:
 
     def segment_texts(self, texts: List[str], threshold: Optional[float] = None, from_wiki=False) -> Generator[str, None, None]:
         """
-        Load a model and segment text(s).
+        Load a model and data; yield segmented text(s).
         """
         if self.load_from is None:
             raise ValueError("Can't segment without a load_from path.")
@@ -300,12 +310,10 @@ class TextSeg:
         logger.info(f"Loaded {len(text_data)} texts.")
         del texts
 
-        # segmented_texts = []
         with tqdm(desc='Segmenting', total=len(text_loader.dataset), leave=False) as pbar:
             with torch.inference_mode():
                 for sents, texts, doc_lengths in text_loader:
                     if sents is None:
-                        # segmented_texts.append(None)
                         pbar.update(text_loader.batch_size)
                         continue
                     if self.use_cuda:
@@ -323,11 +331,9 @@ class TextSeg:
                             if predictions[i] == 1 and i < doc_len-1:
                                 segmented_text += f'\n{SECTION_MARK}\n'
                         doc_start_idx += doc_len
-                        # segmented_texts.append(segmented_text)
                         yield segmented_text
                         pbar.update(1)
                     torch.cuda.empty_cache()
-        # return segmented_texts
 
     def train(self, model, optimizer, writer) -> None:
         model.train()
@@ -452,7 +458,6 @@ class TextSeg:
             y_adj = torch.cat((y_adj, y[first_sent_i:final_sent_i-1]), dim=0)
             first_sent_i = final_sent_i
             lengths[i] -= 1
-        
         return x_adj, y_adj, lengths
 
     @staticmethod

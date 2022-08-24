@@ -1,7 +1,7 @@
 import os, torch
 import numpy as np
 from torch.utils.data import Dataset
-from torch.nn.utils.rnn import pad_sequence, pack_sequence
+from torch.nn.utils.rnn import pad_sequence
 from gensim.models import KeyedVectors
 from typing import Optional, List, Tuple
 from utils import sent_tokenize_plus, sectioned_clean_text, clean_text, word_tokenize

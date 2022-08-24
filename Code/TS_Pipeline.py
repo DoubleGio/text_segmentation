@@ -3,11 +3,12 @@ from typing import List, Optional, Callable, Any, Dict, Tuple, Union
 import numpy as np
 import torch
 from torch.utils.data import Dataset, IterableDataset, DataLoader
-from transformers import BatchEncoding
 rng = np.random.default_rng()
 
 class TS_Pipeline:
-
+    """
+    Based on the Transformers [FeatureExtractionPipeline](https://huggingface.co/docs/transformers/v4.21.2/en/main_classes/pipelines#transformers.FeatureExtractionPipeline).
+    """
     def __init__(
         self,
         tokenizer,

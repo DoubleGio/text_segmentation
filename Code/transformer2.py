@@ -1,24 +1,3 @@
-"""
-[pdf](https://arxiv.org/pdf/2110.07160.pdf)
-Transformer² model (without S_single & L_topic):
-    1. Obtain the sentence embeddings (using pretrained BERT).
-        >>> sentence1 = 'sentence one'; sentence2 = 'yet another one'
-        1.1. Pairwise tokenize (skip last sentence I guess?): 
-            >>> tokens = tokenizer(text=sentence1, textpair=sentence2, padding=True, return_tensors='pt')
-            >>> ['[CLS]', 'sentence', 'one', '[SEP]', 'yet', 'another', 'one', '[SEP]']
-        1.2. Get sentence embedding from CLS token:
-            >>> out = model(**tokens)
-            >>> out.last_hidden_state[:, 0, :] # (sentences, tokens, hidden_size)
-    2. Train a transformer model to classify whether each sentence is a segment boundary.
-        2.1. Create a transformer model:
-            >>> y_seg = Sigmoid(Linear2(TransformerΘ(S)))
-            >>> Θ = {'nhead': 24, 'num_encoder_layers': 5, 'dim_feedforward': 1024}
-        2.2. Create a loss function:
-            >>> loss_fn = binary cross entropy loss
-        'For the segmentation predictions, 70% of the inner sentences were randomly masked,
-        while all the begin sentences were not masked in order to address the imbalance class problem.'
-        basically, remove 70% of the non-boundary sentences for training.
-"""
 import os, logging, torch, gc, argparse
 import numpy as np
 from datetime import datetime, timedelta
@@ -41,7 +20,9 @@ logger.addHandler(LoggingHandler(use_tqdm=True))
 tlogging.set_verbosity_error()
 
 class Transformer2:
-
+    """
+    Transformer² model (without S_single & L_topic) based on [this paper](https://arxiv.org/pdf/2110.07160.pdf)
+    """
     def __init__(
         self,
         language: Optional[str] = None,
@@ -257,6 +238,9 @@ class Transformer2:
         return self.test(model, return_acc=True)
 
     def segment_texts(self, texts: List[str], from_wiki=False) -> Generator[str, None, None]:
+        """
+        Load a model and data; yield segmented text(s).
+        """
         if self.load_from is None:
             raise ValueError("Can't segment texts without a load_from path.")
         if texts is not None:
@@ -302,7 +286,6 @@ class Transformer2:
                         yield segmented_text
                         pbar.update(1)
                     torch.cuda.empty_cache()
-
 
     def train(self, model, optimizer, writer) -> None:
         model.train()
@@ -395,13 +378,13 @@ class Transformer2:
             writer.add_scalar('pk_score/test', epoch_avg[0], self.current_epoch)
             writer.add_scalar('wd_score/test', epoch_avg[1], self.current_epoch)
         return (epoch_avg[0], epoch_avg[1], epoch_avg[2]) if return_acc else (epoch_avg[0], epoch_avg[1])
-            
-    
+
     @staticmethod
     def move_to_cuda(*tensors: torch.TensorType) -> Generator[torch.TensorType, None, None]:
         """Moves all given tensors to device."""
         for t in tensors:
             yield t.to(device, non_blocking=True)
+
 
 class Transformer2Pipeline(TS_Pipeline):
     def _sanitize_parameters(
@@ -485,6 +468,7 @@ class Transformer2Pipeline(TS_Pipeline):
             return BatchEncoding(all_model_inputs), torch.from_numpy(all_targets), doc_lengths
             
         return cat_collate
+
 
 def main(args):
     t2 = Transformer2(

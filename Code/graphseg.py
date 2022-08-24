@@ -103,7 +103,7 @@ def run_graphseg(location: Union[str, List[str]], lang='en', n: Optional[int] = 
     """
     Run GraphSeg for <n> files in <location>.
 
-    Parameters
+    Args:
     ===================
     location: str
         Path to directory containing files or paths to files to be segmented.

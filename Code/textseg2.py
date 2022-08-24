@@ -25,17 +25,14 @@ logger.setLevel(logging.DEBUG)
 logger.addHandler(LoggingHandler(use_tqdm=True))
 tlogging.set_verbosity_error()
 
-
 class TextSeg2(TextSeg):
     """
     Updated implementation of https://github.com/koomri/text-segmentation.
     Extended with the enhancements from https://github.com/lxing532/improve_topic_seg.
     """
-  
     def __init__(self, bert_name: Optional[str] = None, **kwargs) -> None:
+        # If bert_name is given, use a pipeline including the BERT embedder, instead of the default dataset.
         if bert_name:
-            # 'bert-base-uncased' = EN
-            # 'GroNLP/bert-base-dutch-cased' = NL
             self.load_data = self.load_pipeline(bert_name)
         if kwargs.get('quiet', False):
             logger.setLevel(logging.WARNING)
@@ -116,7 +113,7 @@ class TextSeg2(TextSeg):
     # Override
     def segment_texts(self, texts: List[str], threshold: Optional[float] = None, from_wiki=False) -> Generator[str, None, None]:
         """
-        Load a model and segment text(s).
+        Load a model and data; yield segmented text(s).
         """
         if self.load_from is None:
             raise ValueError("Can't segment without a load_from path.")
@@ -141,12 +138,10 @@ class TextSeg2(TextSeg):
         logger.info(f"Using threshold {threshold:.2}.")
         del state
 
-        # segmented_texts = []
         with tqdm(desc='Segmenting', total=len(text_loader), leave=False) as pbar:
             with torch.inference_mode():
                 for bert_sents, sents, texts, doc_lengths in text_loader:
                     if sents is None:
-                        # segmented_texts.append(None)
                         pbar.update(text_loader.batch_size)
                         continue
                     if self.use_cuda:
@@ -164,7 +159,6 @@ class TextSeg2(TextSeg):
                             if predictions[i] == 1 and i < doc_len-1:
                                 segmented_text += f'\n{SECTION_MARK}\n'
                         doc_start_idx += doc_len
-                        # segmented_texts.append(segmented_text)
                         yield segmented_text
                         pbar.update(1)
                     torch.cuda.empty_cache()
@@ -465,6 +459,7 @@ class Textseg2Pipeline(TS_Pipeline):
             return BatchEncoding(all_model_inputs), all_data, all_targets, doc_lengths
             
         return cat_collate
+
 
 def main(args):
     ts = TextSeg2(

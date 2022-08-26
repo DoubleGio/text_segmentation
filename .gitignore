@@ -4,12 +4,17 @@ GraphSeg
 data/
 data_*/
 Datasets/word2vec-nl-combined-160.txt
+Datasets/uncased_L-12_H-768_A-12
+Datasets/NLNews/temp
 planning.*
 .vscode
 checkpoints
 extract_rtvm.ipynb
 text_segmenter.ipynb
 *.svg
+*.tar*
+*.tgz
+*.bz2
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

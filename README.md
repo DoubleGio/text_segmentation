@@ -1,8 +1,8 @@
 # Text Segmentation on Datasets from Different (Dutch) Modalities
 ## MSc Research Project
+This repository contains code and supplementary materials which are required to create datasets, and train and evaluate models, as described in the paper [*Text Segmentation on Datasets from Different (Dutch) Modalities*](https://github.com/DoubleGio/text_segmentation/blob/main/Text%20Segmentation%20-%20AI%20Thesis.pdf).
 
 ### Setup
-
 1. Create a new Python 3.8.* virtual environment and install the required packages.
    * Using Conda: `conda create -n ts_env python=3.8`
    * Using venv: `python3 -m venv ts_env`

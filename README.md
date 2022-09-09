@@ -14,4 +14,4 @@
    * [ENWiki](https://drive.google.com/file/d/13UBi6n5PabD9HaZHLn51QBnhV_MF_0da/view?usp=sharing)
    * [NLWiki](https://drive.google.com/file/d/15YD3gmZVSe2-sdxPFSdDJMEjnjzoxdqM/view?usp=sharing)
    * [NLNews](https://drive.google.com/file/d/1X0ZhqI1ojH__BdRKpCH4FDviJcC6rQ6t/view?usp=sharing)
-5. **OR** create the datasets yourself by following the Python Notebooks in the Code/data_extractors folder.
+5. **OR** create the datasets yourself by following the Python Notebooks in the [Code/data_extractors](https://github.com/DoubleGio/text_segmentation/tree/main/Code/dataset_extractors) folder.
